@@ -62,6 +62,11 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
         body: JSON.stringify(body),
       })
 
+      if (!res.ok && res.status >= 500) {
+        setError('Something went wrong. Please try again.')
+        return
+      }
+
       const data = (await res.json()) as ApiResponse<VideoCreateResponse>
       if (!data.success) {
         setError(data.error)

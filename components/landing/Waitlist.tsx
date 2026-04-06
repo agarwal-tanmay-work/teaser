@@ -24,6 +24,11 @@ export default function Waitlist() {
         body: JSON.stringify({ email }),
       })
 
+      if (!res.ok && res.status >= 500) {
+        setError('Something went wrong. Please try again.')
+        return
+      }
+
       const data = (await res.json()) as ApiResponse<WaitlistJoinResponse>
 
       if (!data.success) {

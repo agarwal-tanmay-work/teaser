@@ -30,6 +30,7 @@ function progressToStage(progress: number): number {
 /** Fetches the current status of a video job from the API. */
 async function fetchJobStatus(jobId: string): Promise<VideoJob> {
   const res = await fetch(`/api/videos/status/${jobId}`)
+  if (!res.ok) throw new Error(`Status check failed (HTTP ${res.status})`)
   const data = (await res.json()) as ApiResponse<VideoJob>
   if (!data.success) throw new Error(data.error)
   return data.data
