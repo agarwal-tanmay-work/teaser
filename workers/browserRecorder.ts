@@ -1,8 +1,8 @@
 import fs from 'fs'
 import path from 'path'
 import { chromium, type Page } from 'playwright'
-import { logger } from '@/lib/logger'
-import type { DemoStep } from '@/types'
+import { logger } from '../lib/logger'
+import type { DemoStep } from '../types'
 
 const RECORDINGS_DIR = '/tmp/recordings'
 
