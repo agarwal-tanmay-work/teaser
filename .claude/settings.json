@@ -1,0 +1,54 @@
+{
+  "model": "claude-sonnet-4-6",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd $(git rev-parse --show-toplevel 2>/dev/null || echo .) && pnpm type-check 2>&1 | tail -10"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'SESSION ENDING — update project_state.md before stopping'"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Teaser session started. Read CLAUDE.md and project_state.md first.'"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(pnpm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(git *)",
+      "Bash(echo *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(rm *)",
+      "Bash(ffmpeg *)",
+      "Read(**)",
+      "Write(**)",
+      "Edit(**)"
+    ]
+  }
+}

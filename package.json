@@ -1,0 +1,51 @@
+{
+  "name": "teaser",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "type-check": "tsc --noEmit",
+    "worker": "npx ts-node --project tsconfig.json workers/videoProcessor.ts"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@playwright/test": "^1.59.1",
+    "@remotion/bundler": "^4.0.446",
+    "@remotion/cli": "^4.0.446",
+    "@remotion/player": "^4.0.446",
+    "@supabase/auth-helpers-nextjs": "^0.15.0",
+    "@supabase/ssr": "^0.10.0",
+    "@supabase/supabase-js": "^2.101.1",
+    "@tanstack/react-query": "^5.96.2",
+    "@tanstack/react-query-devtools": "^5.96.2",
+    "bullmq": "^5.73.0",
+    "canvas-confetti": "^1.9.4",
+    "fluent-ffmpeg": "^2.1.3",
+    "framer-motion": "^12.38.0",
+    "ioredis": "^5.10.1",
+    "next": "16.2.2",
+    "playwright": "^1.59.1",
+    "posthog-js": "^1.364.7",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "remotion": "^4.0.446",
+    "winston": "^3.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/canvas-confetti": "^1.9.0",
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.2",
+    "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5"
+  }
+}

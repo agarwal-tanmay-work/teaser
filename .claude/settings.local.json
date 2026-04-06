@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf node_modules package-lock.json CLAUDE.md AGENTS.md)",
+      "Bash(cp ../teaser_backup/CLAUDE.md ../teaser_backup/project_state.md ../teaser_backup/.worktreeinclude .)",
+      "Bash(pnpm install:*)",
+      "Bash(npm install:*)",
+      "Bash(pnpm --version)",
+      "Bash(npm root:*)",
+      "Read(//c/Users/priya/AppData/Roaming/npm/**)",
+      "Bash(\"C:\\\\Users\\\\priya\\\\AppData\\\\Roaming\\\\npm\\\\pnpm.cmd\" --version)",
+      "Bash(export PATH=\"$PATH:/c/Users/priya/AppData/Roaming/npm\")",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm type-check:*)",
+      "Bash(pnpm build:*)"
+    ]
+  }
+}
