@@ -1,10 +1,11 @@
 'use client'
 
+import { motion } from 'framer-motion'
 import { useState } from 'react'
 import confetti from 'canvas-confetti'
 import type { ApiResponse, WaitlistJoinResponse } from '@/types'
 
-/** Waitlist sign-up section with email form, success confetti, and position display. */
+/** CTA section — "Stop recording, start launching" matching the reference design. */
 export default function Waitlist() {
   const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
@@ -38,10 +39,10 @@ export default function Waitlist() {
 
       setResult(data.data)
       confetti({
-        particleCount: 120,
-        spread: 70,
+        particleCount: 140,
+        spread: 80,
         origin: { y: 0.6 },
-        colors: ['#ffffff', '#6E6E6E', '#22C55E'],
+        colors: ['#b6a0ff', '#00e3fd', '#f9f9fd', '#FFBD2E'],
       })
     } catch {
       setError('Something went wrong. Please try again.')
@@ -51,82 +52,188 @@ export default function Waitlist() {
   }
 
   return (
-    <section id="waitlist" className="py-24 px-6 md:px-12">
-      <div className="max-w-3xl mx-auto bg-[#111111] border border-[#1F1F1F] rounded-2xl p-8 md:p-12 text-center">
-        <h2 className="text-white text-4xl font-bold mb-4">
-          Be the first to automate your launch video
-        </h2>
-        <p className="text-[#6E6E6E] text-lg mb-8">
-          We are onboarding founders in batches to ensure quality. Join now to reserve your
-          spot in the first batch.
-        </p>
+    <section id="waitlist" style={{ padding: '128px 32px' }}>
+      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+        <motion.div
+          initial={{ opacity: 0, y: 32 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-60px' }}
+          transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] as [number,number,number,number] }}
+          className="relative overflow-hidden text-center"
+          style={{
+            background: '#111417',
+            borderRadius: '40px',
+            padding: '96px 64px',
+          }}
+        >
+          {/* AI energy gradient overlay — very subtle */}
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background: 'linear-gradient(135deg, #b6a0ff, #00e3fd)',
+              opacity: 0.05,
+            }}
+          />
 
-        {result ? (
-          /* Success state */
-          <div className="flex flex-col items-center gap-4">
-            <div className="w-16 h-16 rounded-full bg-[#22C55E]/10 border border-[#22C55E]/30 flex items-center justify-center">
-              <svg
-                className="w-8 h-8 text-[#22C55E]"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+          {!result ? (
+            <>
+              <motion.h2
+                initial={{ opacity: 0, y: 12 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.6 }}
+                className="font-extrabold tracking-tight relative z-10"
+                style={{
+                  fontSize: 'clamp(2.2rem, 5vw, 3.5rem)',
+                  fontFamily: 'var(--font-manrope)',
+                  color: '#f9f9fd',
+                  marginBottom: '16px',
+                  lineHeight: 1.2,
+                }}
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-            </div>
-            <p className="text-white text-2xl font-semibold">You are on the list!</p>
-            <p className="text-[#6E6E6E]">
-              You are number <span className="text-white font-semibold">{result.position}</span> on
-              the waitlist.
-            </p>
-            <p className="text-[#6E6E6E] text-sm">
-              We will email you at{' '}
-              <span className="text-white">{email}</span> when your spot is ready.
-            </p>
-          </div>
-        ) : (
-          /* Form state */
-          <>
-            <form
-              onSubmit={handleSubmit}
-              className="flex flex-col sm:flex-row gap-3 max-w-md mx-auto"
+                Stop recording,{' '}
+                <br />
+                start <span className="ai-energy-text">launching</span>.
+              </motion.h2>
+
+              <motion.p
+                initial={{ opacity: 0, y: 12 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.6, delay: 0.05 }}
+                className="relative z-10"
+                style={{
+                  color: '#aaabaf',
+                  fontSize: '1.1rem',
+                  lineHeight: 1.7,
+                  marginBottom: '40px',
+                  maxWidth: '480px',
+                  margin: '0 auto 40px',
+                }}
+              >
+                Join 4,000+ founders who have automated their product storytelling.
+              </motion.p>
+
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.6, delay: 0.1 }}
+                className="relative z-10 flex flex-col sm:flex-row gap-4 justify-center"
+              >
+                <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-4">
+                  <motion.button
+                    type="submit"
+                    disabled={loading}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.97 }}
+                    className="ai-energy-gradient font-extrabold"
+                    style={{
+                      padding: '20px 48px',
+                      borderRadius: '9999px',
+                      color: '#000',
+                      fontFamily: 'var(--font-manrope)',
+                      fontSize: '1.1rem',
+                      boxShadow: '0 16px 48px rgba(182,160,255,0.30)',
+                      cursor: loading ? 'not-allowed' : 'pointer',
+                      opacity: loading ? 0.6 : 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                    }}
+                  >
+                    {loading ? (
+                      <>
+                        <span
+                          className="w-4 h-4 rounded-full animate-spin"
+                          style={{ border: '2px solid rgba(0,0,0,0.2)', borderTopColor: '#000' }}
+                        />
+                        Joining…
+                      </>
+                    ) : (
+                      'Get Started for Free'
+                    )}
+                  </motion.button>
+                </form>
+
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' })}
+                  className="font-bold"
+                  style={{
+                    padding: '20px 48px',
+                    borderRadius: '9999px',
+                    color: '#f9f9fd',
+                    fontFamily: 'var(--font-manrope)',
+                    fontSize: '1.1rem',
+                    background: 'transparent',
+                    border: '1px solid rgba(70,72,75,0.30)',
+                  }}
+                >
+                  Talk to Sales
+                </motion.button>
+              </motion.div>
+
+              {error && (
+                <motion.p
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="relative z-10 mt-4"
+                  style={{ color: '#EF4444', fontSize: '0.875rem' }}
+                >
+                  {error}
+                </motion.p>
+              )}
+
+              <p
+                className="relative z-10 mt-6 uppercase tracking-[0.2em] text-xs"
+                style={{ color: '#aaabaf', fontFamily: 'var(--font-space-grotesk)' }}
+              >
+                No Credit Card Required · Instant Setup
+              </p>
+            </>
+          ) : (
+            /* Success state */
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] as [number,number,number,number] }}
+              className="relative z-10 flex flex-col items-center gap-5"
             >
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Enter your work email"
-                className="flex-1 px-4 py-3 bg-[#0A0A0A] border border-[#1F1F1F] rounded-md text-white placeholder:text-[#6E6E6E] focus:outline-none focus:border-white transition-colors"
-              />
-              <button
-                type="submit"
-                disabled={loading}
-                className="px-6 py-3 bg-white text-black font-semibold rounded-md hover:bg-gray-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              <div className="relative">
+                <div
+                  className="absolute inset-0 rounded-full blur-xl"
+                  style={{ background: 'linear-gradient(135deg, #b6a0ff, #00e3fd)', opacity: 0.3 }}
+                />
+                <div
+                  className="relative w-16 h-16 rounded-full flex items-center justify-center"
+                  style={{ background: 'rgba(182,160,255,0.10)', border: '1px solid rgba(182,160,255,0.30)' }}
+                >
+                  <svg className="w-8 h-8" style={{ color: '#b6a0ff' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+              </div>
+              <p
+                className="font-bold"
+                style={{ fontSize: '1.75rem', fontFamily: 'var(--font-manrope)', color: '#f9f9fd' }}
               >
-                {loading ? (
-                  <>
-                    <span className="w-4 h-4 border-2 border-black/20 border-t-black rounded-full animate-spin" />
-                    Joining...
-                  </>
-                ) : (
-                  'Join the waitlist'
-                )}
-              </button>
-            </form>
-            {error && (
-              <p className="mt-3 text-[#EF4444] text-sm">{error}</p>
-            )}
-            <p className="mt-3 text-[#6E6E6E] text-sm">
-              No spam. No credit card. We email you when your spot is ready.
-            </p>
-          </>
-        )}
+                You&apos;re on the list!
+              </p>
+              <p style={{ color: '#aaabaf', fontSize: '1.1rem' }}>
+                You are{' '}
+                <span className="ai-energy-text font-bold" style={{ fontSize: '1.25rem' }}>
+                  #{result.position}
+                </span>{' '}
+                on the waitlist.
+              </p>
+              <p style={{ color: '#aaabaf', fontSize: '0.875rem' }}>
+                We&apos;ll email <span style={{ color: '#f9f9fd' }}>{email}</span> when your spot is ready.
+              </p>
+            </motion.div>
+          )}
+        </motion.div>
       </div>
     </section>
   )

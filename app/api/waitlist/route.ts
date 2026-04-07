@@ -29,31 +29,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<W
     const { email } = parsed.data
     const supabase = createServerClient()
 
-    // Check for duplicate email
-    const { data: existing, error: lookupError } = await supabase
-      .from('waitlist')
-      .select('position')
-      .eq('email', email)
-      .maybeSingle()
-
-    if (lookupError) {
-      logger.error('waitlist POST: lookup error', { error: lookupError.message })
-      return NextResponse.json(
-        { success: false, error: 'Something went wrong. Please try again.' },
-        { status: 500 }
-      )
-    }
-
-    if (existing) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          position: existing.position as number,
-          message: 'You are already on the list! We will be in touch soon.',
-        },
-      })
-    }
-
     // Count existing entries to calculate position
     const { count, error: countError } = await supabase
       .from('waitlist')
@@ -76,6 +51,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<W
     })
 
     if (insertError) {
+      // Unique constraint violation (code 23505) = email already on waitlist
+      if (insertError.code === '23505') {
+        return NextResponse.json({
+          success: true,
+          data: {
+            position,
+            message: 'You are already on the list! We will be in touch soon.',
+          },
+        })
+      }
       logger.error('waitlist POST: insert error', { error: insertError.message })
       return NextResponse.json(
         { success: false, error: 'Something went wrong. Please try again.' },

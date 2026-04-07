@@ -10,11 +10,50 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
-  background-color: #0a0a0a;
-  color: #ffffff;
+  background-color: #0c0e11;
+  color: #f9f9fd;
 }
 
 a {
   color: inherit;
   text-decoration: none;
+}
+
+/* ── AI Energy Gradient ─────────────────────────────── */
+.ai-energy-gradient {
+  background: linear-gradient(135deg, #b6a0ff 0%, #00e3fd 100%);
+}
+
+.ai-energy-text {
+  background: linear-gradient(135deg, #b6a0ff 0%, #00e3fd 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Glassmorphism ─────────────────────────────────── */
+.glass-panel {
+  backdrop-filter: blur(12px);
+  background: rgba(17, 20, 23, 0.7);
+}
+
+/* ── Surface Hierarchy ─────────────────────────────── */
+/* Level 0 – base:              #0c0e11  */
+/* Level 1 – sections:          #111417  */
+/* Level 2 – cards:             #171a1d  */
+/* Level 3 – popovers/inputs:   #1d2024  */
+
+/* ── Ghost border utility ─────────────────────────── */
+.ghost-border {
+  border: 1px solid rgba(70, 72, 75, 0.15);
+}
+
+/* ── Pulsing magic chip ───────────────────────────── */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 4px 1px rgba(182, 160, 255, 0.4); }
+  50%       { box-shadow: 0 0 10px 3px rgba(0, 227, 253, 0.5); }
+}
+
+.magic-pulse {
+  animation: pulse-glow 2.5s ease-in-out infinite;
 }

@@ -1,3 +1,6 @@
+import { config } from 'dotenv'
+config({ path: '.env.local' })
+
 import { Worker, type Job } from 'bullmq'
 import fs from 'fs'
 import { createServiceClient } from '../lib/supabase'
@@ -13,6 +16,17 @@ import type {
   VideoLength,
 } from '../types'
 import type { VideoJobQueueData } from '../lib/queue'
+
+/** Upstash Redis connection derived from REST credentials (must run after dotenv.config). */
+function buildRedisConnection(): { host: string; port: number; password: string; tls: object } {
+  const restUrl = process.env.UPSTASH_REDIS_REST_URL ?? ''
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? ''
+  if (!restUrl || !token) {
+    logger.warn('videoProcessor: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set — worker will fail to connect')
+  }
+  const host = restUrl ? new URL(restUrl).hostname : '127.0.0.1'
+  return { host, port: 6379, password: token, tls: {} }
+}
 
 /** Shape of the data stored on each BullMQ job. */
 interface WorkerJobData {
@@ -77,6 +91,8 @@ async function fetchInternal<T>(
  *
  * On any failure: logs the error, marks the job as 'failed' in Supabase, rethrows.
  */
+const _redisConn = buildRedisConnection()
+
 const worker = new Worker<VideoJobQueueData>(
   'video-generation',
   async (job: Job<WorkerJobData>) => {
@@ -213,7 +229,7 @@ const worker = new Worker<VideoJobQueueData>(
     }
   },
   {
-    connection: { url: process.env.UPSTASH_REDIS_REST_URL ?? '' },
+    connection: _redisConn,
     concurrency: 2,
   }
 )

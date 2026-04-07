@@ -10,13 +10,24 @@ export interface VideoJobQueueData extends VideoJobCreateInput {
 let _queue: Queue | null = null
 
 /**
+ * Builds ioredis connection options from Upstash REST credentials.
+ * Uses explicit host/port/password/tls to avoid URL-parsing edge cases.
+ */
+function buildRedisConnection(): { host: string; port: number; password: string; tls: object } {
+  const restUrl = process.env.UPSTASH_REDIS_REST_URL ?? ''
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? ''
+  const host = restUrl ? new URL(restUrl).hostname : '127.0.0.1'
+  return { host, port: 6380, password: token, tls: {} }
+}
+
+/**
  * Returns the BullMQ queue singleton, creating it on first call.
  * Lazy initialisation prevents Redis connection attempts during Next.js build.
  */
 function getQueue(): Queue {
   if (!_queue) {
     _queue = new Queue('video-generation', {
-      connection: { url: process.env.UPSTASH_REDIS_REST_URL ?? '' },
+      connection: buildRedisConnection(),
     })
   }
   return _queue

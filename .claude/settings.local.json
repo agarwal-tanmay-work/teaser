@@ -12,7 +12,19 @@
       "Bash(export PATH=\"$PATH:/c/Users/priya/AppData/Roaming/npm\")",
       "Bash(pnpm add:*)",
       "Bash(pnpm type-check:*)",
-      "Bash(pnpm build:*)"
+      "Bash(pnpm build:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(find . -type f \\\\\\( -name \"*.ts\" -o -name \"*.tsx\" \\\\\\) -not -path \"*/node_modules/*\" -not -path \"*/.next/*\" -exec grep -l \"export\" {} \\\\;)",
+      "Bash(export PATH=\"/c/Users/priya/AppData/Roaming/npm:$PATH\")",
+      "Bash(tasklist /FI \"IMAGENAME eq node.exe\")",
+      "Bash(xargs kill:*)",
+      "Bash(curl -s http://localhost:3000/api/waitlist -X POST -H \"Content-Type: application/json\" -d '{\"email\":\"test@example.com\"}')",
+      "Bash(curl:*)",
+      "Bash(/c/Users/priya/AppData/Roaming/npm/pnpm.cmd dev:*)",
+      "Bash(/c/Users/priya/AppData/Roaming/npm/npx.cmd playwright:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)"
     ]
   }
 }
