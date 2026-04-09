@@ -14,11 +14,10 @@ const VIDEO_HEIGHT = 1080
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 /**
- * CSS injected into every page to hide intrusive UI overlays.
- * Does NOT kill animations — we want sites to look natural in recordings.
+ * CSS injected into every page to hide intrusive overlays.
+ * Does NOT kill animations — we want sites to look natural.
  */
 const POPUP_HIDE_CSS = `
-  /* Hide cookie banners, modals, chat widgets that obscure the UI */
   [class*="cookie"], [class*="Cookie"],
   [id*="cookie"], [id*="Cookie"],
   [class*="consent"], [class*="Consent"],
@@ -32,8 +31,8 @@ const POPUP_HIDE_CSS = `
 
 /**
  * CSS for the animated custom cursor injected into every recorded page.
- * Renders a visible, glowing cursor that slides smoothly between interaction
- * targets and pulses on click — all baked into the Playwright recording.
+ * A visible glowing cursor that slides smoothly between targets and
+ * pulses on click — all baked into the Playwright recording.
  */
 const CUSTOM_CURSOR_CSS = `
   #__teaser_cursor__ {
@@ -82,6 +81,66 @@ const CUSTOM_CURSOR_CSS = `
 `
 
 /**
+ * Init script injected before any page JS runs.
+ * Uses a MutationObserver to inject a dark loading overlay as soon as
+ * document.body exists — preventing any white flash from being recorded.
+ * The overlay is faded out programmatically once the page is ready.
+ */
+const INIT_OVERLAY_SCRIPT = `
+  (function() {
+    var OVERLAY_ID = '__teaser_loading__';
+    var STYLE_ID   = '__teaser_loading_style__';
+
+    function injectOverlay() {
+      if (!document.head && !document.body) return;
+
+      if (document.head && !document.getElementById(STYLE_ID)) {
+        var s = document.createElement('style');
+        s.id = STYLE_ID;
+        s.textContent =
+          'html,body{background:#080614!important}' +
+          '#' + OVERLAY_ID + '{' +
+            'position:fixed!important;inset:0!important;' +
+            'background:#080614!important;' +
+            'z-index:2147483648!important;' +
+            'transition:opacity 1.2s ease!important;' +
+          '}';
+        document.head.prepend(s);
+      }
+
+      if (document.body && !document.getElementById(OVERLAY_ID)) {
+        var d = document.createElement('div');
+        d.id = OVERLAY_ID;
+        document.body.prepend(d);
+        obs.disconnect();
+      }
+    }
+
+    var obs = new MutationObserver(injectOverlay);
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+    injectOverlay();
+  })();
+`
+
+/**
+ * Fades out and removes the loading overlay once the page is ready.
+ */
+async function fadeOutOverlay(page: Page): Promise<void> {
+  try {
+    await page.evaluate(() => {
+      const d = document.getElementById('__teaser_loading__') as HTMLElement | null
+      if (d) {
+        d.style.opacity = '0'
+        setTimeout(() => d.remove(), 1300)
+      }
+    })
+    await page.waitForTimeout(1400)
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
  * Injects the custom cursor element into the page.
  * Idempotent — safe to call after every navigation.
  */
@@ -111,7 +170,7 @@ async function moveCursorTo(page: Page, x: number, y: number): Promise<void> {
         const cursor = document.getElementById('__teaser_cursor__') as HTMLElement | null
         if (cursor) {
           cursor.style.left = `${px}px`
-          cursor.style.top = `${py}px`
+          cursor.style.top  = `${py}px`
         }
       },
       { px: x, py: y }
@@ -137,7 +196,7 @@ async function triggerClickAnimation(page: Page, x: number, y: number): Promise<
         const ripple = document.createElement('div')
         ripple.className = 'teaser-ripple'
         ripple.style.left = `${px}px`
-        ripple.style.top = `${py}px`
+        ripple.style.top  = `${py}px`
         document.body.appendChild(ripple)
         setTimeout(() => ripple.remove(), 820)
       },
@@ -149,8 +208,15 @@ async function triggerClickAnimation(page: Page, x: number, y: number): Promise<
 }
 
 /**
- * Attempts to find an element on the page using multiple selector strategies.
- * Tries exact selector, text match, button text, aria-label, and link text.
+ * Finds an element using Playwright's locator API with partial, case-insensitive
+ * text matching — far more robust than CSS selectors for real-world CTA buttons
+ * and navigation links.
+ *
+ * Strategy order (fastest→most generic):
+ *   1. Role-based (button/link/menuitem/tab by accessible name)
+ *   2. Text content (partial, case-insensitive)
+ *   3. Form helpers (label, placeholder)
+ *   4. CSS selector (only if selector looks like CSS)
  */
 async function findElement(
   page: Page,
@@ -158,41 +224,54 @@ async function findElement(
 ): Promise<ElementHandle | null> {
   if (!selector) return null
 
-  const strategies = [
-    // 1. Direct CSS selector (only useful when Gemini gives a real CSS selector)
-    selector,
-    // 2. Exact text match
-    `text="${selector}"`,
-    // 3. Partial text in buttons
-    `button:has-text("${selector}")`,
-    // 4. Partial text in links
-    `a:has-text("${selector}")`,
-    // 5. Aria-label match
-    `[aria-label="${selector}"]`,
-    // 6. Title attribute
-    `[title="${selector}"]`,
-    // 7. Placeholder text (for inputs)
-    `[placeholder="${selector}"]`,
-    // 8. Any element with text (broad fallback — longer timeout)
-    `*:has-text("${selector}")`,
+  // Escape regex special chars so "Get Started" doesn't break the pattern
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(escaped, 'i')
+
+  // ── Group A: Playwright locator API ──
+  // These use the accessibility tree + DOM — partial, case-insensitive, robust.
+  const locatorStrategies = [
+    page.getByRole('button',   { name: re }),
+    page.getByRole('link',     { name: re }),
+    page.getByRole('menuitem', { name: re }),
+    page.getByRole('tab',      { name: re }),
+    page.locator('button',         { hasText: re }),
+    page.locator('a',              { hasText: re }),
+    page.locator('[role="button"]', { hasText: re }),
+    page.locator('nav a',          { hasText: re }),
+    page.locator('li a',           { hasText: re }),
+    page.getByText(selector, { exact: false }),
+    page.getByLabel(selector,       { exact: false }),
+    page.getByPlaceholder(selector, { exact: false }),
   ]
 
-  for (let i = 0; i < strategies.length; i++) {
-    const strat = strategies[i]
-    // Last strategy gets more time — it's the broadest fallback
-    const timeout = i === strategies.length - 1 ? 3000 : 2000
+  for (const locator of locatorStrategies) {
     try {
-      const el = await page.waitForSelector(strat, { state: 'visible', timeout })
-      if (el) {
-        logger.info(`findElement: found "${selector}" via strategy "${strat}"`)
-        return el
+      const first = locator.first()
+      await first.waitFor({ state: 'visible', timeout: 2500 })
+      const handle = await first.elementHandle()
+      if (handle) {
+        logger.info(`findElement: found "${selector}" via locator`)
+        return handle
       }
     } catch {
       continue
     }
   }
 
-  logger.warn(`findElement: could not find element "${selector}" with any strategy`)
+  // ── Group B: CSS selector fallback ──
+  // Only try if the selector string looks like a CSS selector.
+  if (/^[.#\[]|>|\s/.test(selector)) {
+    try {
+      const el = await page.waitForSelector(selector, { state: 'visible', timeout: 2000 })
+      if (el) {
+        logger.info(`findElement: found "${selector}" via CSS selector`)
+        return el
+      }
+    } catch { /* ignore */ }
+  }
+
+  logger.warn(`findElement: could not find "${selector}" with any strategy`)
   return null
 }
 
@@ -211,7 +290,7 @@ async function attemptLogin(
       'input[type="text"]',
     ]
 
-    let usernameField = null
+    let usernameField: ElementHandle | null = null
     for (const selector of usernameSelectors) {
       try {
         usernameField = await page.waitForSelector(selector, { state: 'visible', timeout: 3000 })
@@ -247,7 +326,7 @@ async function attemptLogin(
         const btn = await page.$(selector)
         if (btn) {
           await btn.click()
-          await page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {})
+          await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
           break
         }
       } catch {
@@ -262,7 +341,7 @@ async function attemptLogin(
 /**
  * Executes a single demo step action on the page.
  * Records click coordinates for post-processing zoom effects.
- * Moves the custom cursor to each target before interacting.
+ * Animates the custom cursor to each target before interacting.
  */
 async function executeStep(
   page: Page,
@@ -293,26 +372,28 @@ async function executeStep(
             const centerX = Math.round(box.x + box.width / 2)
             const centerY = Math.round(box.y + box.height / 2)
 
-            clickEvents.push({
-              x: centerX,
-              y: centerY,
-              timestamp: elapsed,
-              action: 'click',
-            })
+            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'click' })
 
-            // Animate cursor to target, then click
             await moveCursorTo(page, centerX, centerY)
             await el.scrollIntoViewIfNeeded()
-            await page.waitForTimeout(400)
+            await page.waitForTimeout(350)
             await triggerClickAnimation(page, centerX, centerY)
-            await el.click()
+
+            // Try normal click; fall back to direct mouse click if covered
+            try {
+              await el.click({ timeout: 4000 })
+            } catch {
+              logger.info(`browserRecorder: step ${step.step} — normal click failed, trying mouse.click`)
+              await page.mouse.move(centerX, centerY)
+              await page.mouse.click(centerX, centerY)
+            }
           } else {
-            await el.click()
+            await el.click({ timeout: 4000 }).catch(() => {})
           }
 
-          // Wait for any navigation or content change
-          await page.waitForTimeout(2200)
-          // Re-inject cursor on the (potentially new) page
+          // Wait for any triggered navigation or animation to settle
+          await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+          await page.waitForTimeout(2000)
           await injectCustomCursor(page)
         } else {
           logger.warn(`browserRecorder: step ${step.step} — click target "${step.element_to_click}" not found, skipping`)
@@ -327,20 +408,12 @@ async function executeStep(
           if (box) {
             const centerX = Math.round(box.x + box.width / 2)
             const centerY = Math.round(box.y + box.height / 2)
-
-            clickEvents.push({
-              x: centerX,
-              y: centerY,
-              timestamp: elapsed,
-              action: 'hover',
-            })
-
+            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'hover' })
             await moveCursorTo(page, centerX, centerY)
             await el.scrollIntoViewIfNeeded()
             await page.waitForTimeout(300)
             await el.hover()
-            // Hold hover to show tooltip/animation
-            await page.waitForTimeout(2200)
+            await page.waitForTimeout(2000)
           }
         }
         break
@@ -353,23 +426,14 @@ async function executeStep(
           if (box) {
             const centerX = Math.round(box.x + box.width / 2)
             const centerY = Math.round(box.y + box.height / 2)
-
-            clickEvents.push({
-              x: centerX,
-              y: centerY,
-              timestamp: elapsed,
-              action: 'type',
-            })
-
+            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'type' })
             await moveCursorTo(page, centerX, centerY)
             await el.scrollIntoViewIfNeeded()
             await page.waitForTimeout(300)
             await triggerClickAnimation(page, centerX, centerY)
             await el.click()
           }
-          const textToType = step.type_text ?? step.description ?? 'hello'
-          // Type with realistic human-like delay
-          await page.keyboard.type(textToType, { delay: 75 })
+          await page.keyboard.type(step.type_text ?? step.description ?? 'hello', { delay: 75 })
           await page.waitForTimeout(1600)
         }
         break
@@ -380,10 +444,10 @@ async function executeStep(
         const targetUrl = step.navigate_to.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to, productUrl).href
-        await page.goto(targetUrl, { waitUntil: 'load', timeout: 30000 })
-        // Re-inject cursor on the new page
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.waitForLoadState('load', { timeout: 8000 }).catch(() => {})
         await injectCustomCursor(page)
-        await page.waitForTimeout(1800)
+        await page.waitForTimeout(2000)
         break
       }
 
@@ -400,11 +464,15 @@ async function executeStep(
 }
 
 /**
- * Records a real product demo using a headless Chromium browser at 1080p HD.
- * Executes the full Gemini-generated demo flow with clicks, navigation, hover,
- * and typing. Injects a custom animated cursor so all interactions are visually
- * clear in the recording. Tracks all interaction coordinates for post-processing
- * zoom effects.
+ * Records a real product demo at 1080p HD.
+ *
+ * Key improvements over naive recording:
+ * - Injects a dark overlay via MutationObserver init script so the white browser
+ *   loading screen is NEVER recorded — overlay fades out when the page is ready.
+ * - Animated custom cursor slides to each target and pulses on click.
+ * - findElement uses Playwright's locator API with partial regex matching for
+ *   robust CTA button discovery regardless of CSS class names.
+ * - Falls back to page.mouse.click at coordinates if el.click() fails.
  *
  * @returns Path to the recorded .webm video file
  */
@@ -422,22 +490,21 @@ export async function recordProduct(
   const browser = await chromium.launch({
     headless: true,
     args: [
-      // Use software OpenGL for consistent, artifact-free rendering
-      '--use-gl=swiftshader',
-      // Memory + sandbox
-      '--disable-dev-shm-usage',
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      // Allow cross-origin iframe interactions
+      '--disable-web-security',
       // Prevent Chrome throttling the headless tab
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
-      // Allow cross-origin iframe interactions
-      '--disable-web-security',
-      // Consistent color profile so colors match design
+      // Consistent colour profile
       '--force-color-profile=srgb',
-      // Smooth scroll animations in recording
+      // Smooth scroll animations
       '--enable-smooth-scrolling',
+      // High quality font rendering
+      '--font-render-hinting=none',
     ],
   })
 
@@ -453,38 +520,50 @@ export async function recordProduct(
       permissions: [],
     })
 
+    // ─── Inject overlay script BEFORE any page loads ───
+    // This fires before page JS and immediately covers the white loading screen
+    // with a dark overlay matching our background colour (#080614).
+    await context.addInitScript(INIT_OVERLAY_SCRIPT)
+
     const page = await context.newPage()
 
-    // Block heavy resources that cause lag (ads, trackers, large media)
+    // Block ads, trackers, large media that slow down rendering
     await page.route('**/*.{mp4,webm,ogg,avi}', (route) => route.abort())
-    await page.route('**/analytics**', (route) => route.abort())
-    await page.route('**/tracking**', (route) => route.abort())
-    await page.route('**/ads**', (route) => route.abort())
+    await page.route('**/analytics**',           (route) => route.abort())
+    await page.route('**/tracking**',            (route) => route.abort())
+    await page.route('**/ads**',                 (route) => route.abort())
 
-    // ─── Initial Load ───
+    // ─── Navigate ───
     logger.info(`browserRecorder: navigating to ${productUrl}`)
     const response = await page.goto(productUrl, {
-      // 'load' waits for all resources, giving sites time to fully render
-      waitUntil: 'load',
+      waitUntil: 'domcontentloaded',
       timeout: 60000,
     })
     if (!response || !response.ok()) {
       throw new Error(`Could not access the product URL. Status: ${response?.status() ?? 'unknown'}`)
     }
 
-    // Let the page fully settle, then inject our cursor
-    await page.waitForTimeout(2800)
+    // Wait for full page load + JS rendering behind the overlay
+    await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {})
+    await page.waitForTimeout(3500)
+
+    // Fade out the dark loading overlay — site is now fully rendered beneath it
+    await fadeOutOverlay(page)
+
+    // Inject cursor and popup-hiding CSS
     await injectCustomCursor(page)
 
     // Optional login
     if (credentials) {
       await attemptLogin(page, credentials)
-      await page.goto(productUrl, { waitUntil: 'load', timeout: 45000 }).catch(() => {})
+      await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+      await page.waitForTimeout(3000)
+      await fadeOutOverlay(page)
       await injectCustomCursor(page)
     }
 
-    // Brief stabilization pause before recording starts
-    await page.waitForTimeout(1500)
+    // Brief pause before starting interactions
+    await page.waitForTimeout(1200)
 
     const recordingStartTime = Date.now()
 
@@ -493,18 +572,16 @@ export async function recordProduct(
     for (const step of demoFlow) {
       logger.info(`browserRecorder: step ${step.step} — ${step.action}: ${step.description}`)
       await executeStep(page, step, productUrl, clickEvents, recordingStartTime)
-      // Brief pause between steps for visual clarity
-      await page.waitForTimeout(900)
+      await page.waitForTimeout(800)
     }
 
     // Final pause to capture the last frame cleanly
-    await page.waitForTimeout(2200)
+    await page.waitForTimeout(2000)
     await context.close()
   } finally {
     await browser.close()
   }
 
-  // Save click events for post-processing zoom
   const eventsPath = path.join(outputDir, 'click_events.json')
   fs.writeFileSync(eventsPath, JSON.stringify(clickEvents, null, 2), 'utf-8')
   logger.info(`browserRecorder: saved ${clickEvents.length} click events to ${eventsPath}`)

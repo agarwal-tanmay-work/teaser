@@ -285,7 +285,8 @@ async function createFramedRecording(
   ])
 
   // Step B: compose browser on gradient with drop shadow
-  // Shadow = blurred copy of browser window, overlaid at a slight offset behind
+  // Shadow = blurred copy of browser window, made semi-transparent via yuva420p,
+  // overlaid at a slight offset behind the browser.
   const shadowOffsetX = PAD_X + 20   // 140
   const shadowOffsetY = PAD_Y + 24   // 92
 
@@ -294,9 +295,9 @@ async function createFramedRecording(
     `[1:v]loop=loop=-1:size=1:start=0,setpts=N/30/TB,scale=${OUT_W}:${OUT_H}[bg]`,
     // Scale browser recording to its framed size
     `[0:v]scale=${BROWSER_W}:${BROWSER_H}:flags=lanczos[browser]`,
-    // Create shadow: blur the browser and reduce opacity
+    // Create shadow: split → blur → convert to YUVA so alpha works → set 50% opacity
     `[browser]split[b1][b2]`,
-    `[b2]boxblur=luma_radius=32:luma_power=3,colorchannelmixer=aa=0.52[shadow]`,
+    `[b2]boxblur=luma_radius=28:luma_power=3,format=yuva420p,colorchannelmixer=aa=0.50[shadow]`,
     // Compose: gradient → shadow (offset) → browser
     `[bg][shadow]overlay=${shadowOffsetX}:${shadowOffsetY}[bg_shadow]`,
     `[bg_shadow][b1]overlay=${PAD_X}:${PAD_Y}:shortest=1[framed]`,
@@ -438,7 +439,11 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       ffmpeg(recordingPath)
         .noAudio()
         .videoCodec('libx264')
-        .outputOptions(['-crf 16', '-preset veryfast', '-r 30', '-pix_fmt yuv420p'])
+        .outputOptions([
+          '-crf 16', '-preset veryfast', '-r 30', '-pix_fmt yuv420p',
+          // Preserve BT.709 colour space — prevents washed-out / desaturated output
+          '-colorspace bt709', '-color_primaries bt709', '-color_trc bt709',
+        ])
         .output(convertedPath)
     )
 
@@ -501,13 +506,16 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
 
         return wrappedLines.map((line, i) => {
           const text    = escapeForFilterScript(line)
-          const yOffset = 54 + (wrappedLines.length - 1 - i) * 40
+          const yOffset = 60 + (wrappedLines.length - 1 - i) * 44
+          // No black box — bright white text with a dark outline + drop shadow
+          // makes captions readable on any background without a pill.
           return (
             `drawtext=text='${text}'` +
             `:enable='between(t,${start},${end})'` +
-            `:fontsize=30:fontcolor=white` +
+            `:fontsize=38:fontcolor=white` +
             `:x=(w-text_w)/2:y=h-th-${yOffset}` +
-            `:box=1:boxcolor=black@0.72:boxborderw=14`
+            `:bordercolor=black:borderw=3` +
+            `:shadowcolor=black:shadowx=2:shadowy=2`
           )
         })
       })
