@@ -91,54 +91,60 @@ export async function understandProduct(
       "step": 1,
       "action": "navigate | click | scroll_down | scroll_up | wait | hover | type",
       "description": "string (what this step demonstrates to the viewer)",
-      "element_to_click": "string (CSS selector, button text, or aria-label — required for click/hover/type)",
-      "navigate_to": "string (full URL or relative path — required for navigate)",
+      "element_to_click": "string (required for click/hover/type — visible button/link text only)",
+      "navigate_to": "string (FULL URL — required for navigate — must be an EXACT URL from the PAGE LIST below)",
       "type_text": "string (text to type — required for type action)"
     }
   ]
 }
 
-CRITICAL INSTRUCTIONS FOR demo_flow:
-You MUST generate a demo_flow of 8 to 12 steps that shows a complete user journey through this product. Do not just scroll through the landing page. The demo must:
-1. Start at the main URL
-2. Click the primary CTA button (Sign up, Get started, Try free, or similar) to show the signup or onboarding
-3. Navigate to the actual product dashboard or main feature area (not just the landing page)
-4. Demonstrate at least 3 core product features by clicking into them
-5. Show the product actually working, not just the marketing page
+━━━ SCRAPED CONTENT (multiple pages) ━━━
+The content below was crawled from the product's actual website. Each section
+starts with "### PAGE: <url>". These are REAL URLs that exist on the site.
 
-If the product requires login and no credentials were provided, navigate to the pricing page and feature pages instead of the dashboard. Never generate a demo_flow that only scrolls the landing page.
+CRITICAL — navigate_to fields:
+- You MUST use only URLs that appear in the "### PAGE:" headers below.
+- Do NOT invent URLs. Do NOT guess paths. Only use URLs you can see in the content.
+- If you want to navigate somewhere, find its exact URL in the page list.
+
+━━━ demo_flow REQUIREMENTS ━━━
+Generate 12–18 steps showing a complete product journey. The demo MUST:
+1. Start at the main product URL
+2. Scroll down slightly to reveal key features/sections above the fold
+3. Navigate to the most important product pages (features, pricing, dashboard, etc.)
+   using exact URLs from the PAGE list — do not stay on the landing page
+4. On each page: click meaningful elements (tabs, feature cards, interactive elements)
+5. Scroll to reveal important content on each page
+6. If there is a pricing page — navigate there and scroll through it
+7. If there is a features/product page — navigate there and interact with it
+8. End with a navigate back to the main URL or a final CTA
 
 STEP GUIDELINES:
-- Use "click" action for buttons, links, tabs, cards, menu items, toggles
-- Use "hover" action for elements with hover effects, tooltips, dropdown menus
-- Use "type" action for search bars, input fields, forms (provide type_text)
-- Use "navigate" action to go to specific URLs/pages directly
-- Use "scroll_down" to reveal content below the fold
-- Use "scroll_up" to return to top
-- Use "wait" after complex interactions to let animations/content load
-- Make the flow feel like a REAL USER exploring the product naturally
+- "click": buttons, links, tabs, cards, nav items, toggles (visible text only)
+- "navigate": to move to a different page — MUST use an exact URL from PAGE list
+- "scroll_down": reveal content below fold (use multiple in a row for long pages)
+- "scroll_up": return to top of page
+- "wait": after every navigate and after every major CTA click
+- "hover": for tooltips, dropdown menus, hover-reveal content
+- "type": for search inputs, forms — include type_text
 
-ELEMENT TARGETING RULES (critical for automation reliability — follow exactly):
-- element_to_click MUST be the VISIBLE TEXT shown on the button or link (e.g., "Get Started", "Sign Up Free", "Try for free", "Pricing", "Features")
-- Do NOT use CSS class names (e.g., ".btn-cta", "#hero-button", ".nav-link") — these WILL fail
-- Do NOT use HTML attributes like data-id or aria-hidden
-- Keep element_to_click SHORT: 1–5 words that exactly match what the user sees on screen
-- For navigation menu items: use the exact nav label ("Features", "Pricing", "About", "Docs", "Blog")
-- For CTA buttons: use the button's visible text exactly as it appears ("Start free trial", "Get started free", "Book a demo")
-- For form inputs: use the placeholder text ("Search...", "Enter your email", "Email address")
-- If a button says "→" or uses an icon only, use its aria-label if visible, otherwise skip it
+ELEMENT TARGETING (critical for automation):
+- element_to_click = the EXACT VISIBLE TEXT on the button or link
+  Examples: "Get Started", "View Pricing", "Start free trial", "Features"
+- NEVER use CSS class names, IDs, or HTML attributes — they WILL fail
+- Keep it SHORT (1–6 words) matching what the user actually sees on screen
+- For nav items: exact label shown in the nav bar
+- For inputs: the placeholder text shown inside the input field
 
-TIMING RULES:
-- Always add a "wait" step immediately after every major CTA click (page loads, modals, animations need time)
-- Always add a "wait" step right after each "navigate" step before interacting with the new page
-- Aim for at least 15 steps total — more meaningful interactions = better product video
-- Show the ACTUAL PRODUCT functionality, not just the marketing landing page
-- If the product has a dashboard, interactive demo, pricing table, or feature showcase — go there and interact with it
+TIMING:
+- Add a "wait" immediately after EVERY "navigate" step
+- Add a "wait" after clicking any button that triggers a page load or modal
+- Total steps: aim for 14–18 for a rich demo experience
 
 Product URL: ${productUrl}
 User description: ${description ?? 'Not provided'}
-Scraped content:
-${scrapedContent.slice(0, 12000)}`
+
+${scrapedContent.slice(0, 40000)}`
 
   const text = await generateWithFallback(systemInstruction, prompt)
   const jsonText = extractJson(text)

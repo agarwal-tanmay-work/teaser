@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { scrapeUrl } from '@/lib/firecrawl'
+import { crawlSite } from '@/lib/firecrawl'
 import { understandProduct } from '@/lib/gemini'
 import { logger } from '@/lib/logger'
 import type { ApiResponse, ProductUnderstanding } from '@/types'
@@ -34,9 +34,9 @@ export async function POST(
 
     let scrapedContent: string
     try {
-      scrapedContent = await scrapeUrl(product_url)
+      scrapedContent = await crawlSite(product_url)
     } catch (error) {
-      logger.error('videos/understand: scrape failed', { product_url, error })
+      logger.error('videos/understand: crawl failed', { product_url, error })
       return NextResponse.json(
         {
           success: false,

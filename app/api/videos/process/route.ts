@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { cookies } from 'next/headers'
 import { createServerClient as createSSRClient } from '@supabase/ssr'
 import { createServiceClient } from '@/lib/supabase'
-import { scrapeUrl } from '@/lib/firecrawl'
+import { crawlSite } from '@/lib/firecrawl'
 import { understandProduct, generateScript } from '@/lib/gemini'
 import { generateVoiceover } from '@/lib/tts'
 import { logger } from '@/lib/logger'
@@ -170,11 +170,14 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     await performPreFlightCheck()
     await updateProgress(jobId, 2, 'System ready. Moving to scraping...')
 
-    // ── Stage 1: Scrape (0 → 10%) ─────────────────────────────────────────
-    await updateProgress(jobId, 3, 'Reading your product website...')
+    // ── Stage 1: Crawl (0 → 10%) ──────────────────────────────────────────
+    // crawlSite discovers and scrapes multiple pages (landing page + features,
+    // pricing, dashboard, etc.) so Gemini has full product knowledge and can
+    // generate navigate_to steps with real, verified URLs.
+    await updateProgress(jobId, 3, 'Discovering and reading your product pages...')
     let scrapedContent: string
     try {
-      scrapedContent = await scrapeUrl(productUrl)
+      scrapedContent = await crawlSite(productUrl)
     } catch {
       throw new Error(
         'Could not scrape your product URL. Make sure it is publicly accessible and the FIRECRAWL_API_KEY is set.'
