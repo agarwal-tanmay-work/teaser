@@ -48,6 +48,10 @@ export interface ScriptSegment {
   end_time: number
   narration: string
   what_to_show: string
+  action: DemoAction
+  element_to_click?: string
+  navigate_to?: string
+  type_text?: string
   zoom_target?: string
 }
 

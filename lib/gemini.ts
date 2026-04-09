@@ -99,20 +99,14 @@ export async function understandProduct(
 }
 
 CRITICAL INSTRUCTIONS FOR demo_flow:
-You MUST generate a COMPREHENSIVE, INTERACTIVE demo flow with 10–20 steps.
-The goal is to create a professional product tour video — NOT just scroll the landing page.
+You MUST generate a demo_flow of 8 to 12 steps that shows a complete user journey through this product. Do not just scroll through the landing page. The demo must:
+1. Start at the main URL
+2. Click the primary CTA button (Sign up, Get started, Try free, or similar) to show the signup or onboarding
+3. Navigate to the actual product dashboard or main feature area (not just the landing page)
+4. Demonstrate at least 3 core product features by clicking into them
+5. Show the product actually working, not just the marketing page
 
-MANDATORY REQUIREMENTS:
-1. Start by navigating to the product URL and waiting for load
-2. Scroll through the hero section to show the main value proposition
-3. Click the MAIN CTA button (e.g., "Get Started", "Try Free", "Sign Up", "Learn More")
-4. Navigate to at least 2-3 internal pages (pricing, features, about, dashboard, docs)
-5. Click on feature cards, tabs, toggles, accordions, or interactive demos on each page
-6. Hover over elements that have tooltips, dropdowns, or hover animations
-7. If there's a search bar or input field, type a relevant search query
-8. Show the product's core workflow or main feature in action
-9. Click through any onboarding steps, modals, or interactive guides
-10. Return to the homepage for a final hero shot
+If the product requires login and no credentials were provided, navigate to the pricing page and feature pages instead of the dashboard. Never generate a demo_flow that only scrolls the landing page.
 
 STEP GUIDELINES:
 - Use "click" action for buttons, links, tabs, cards, menu items, toggles
@@ -183,6 +177,9 @@ export async function generateScript(
     'You are a world-class product video scriptwriter. Return ONLY valid JSON — no markdown, no code fences, no explanation.'
 
   const prompt = `Write a ${videoLength}-second product launch video script for "${understanding.product_name}".
+The script must be precisely timed to align with a user demo of the product. Use the provided demo_flow to structure the segments.
+For each segment, YOU MUST map the corresponding demo_flow step to the script segment. Extract the "what_to_show" field and derive the exact action from it.
+
 Return ONLY valid JSON:
 {
   "total_duration": ${videoLength},
@@ -192,7 +189,11 @@ Return ONLY valid JSON:
       "end_time": 5,
       "narration": "exact words to speak",
       "what_to_show": "what appears on screen",
-      "zoom_target": "optional element to zoom"
+      "zoom_target": "optional element to zoom",
+      "action": "navigate | click | scroll_down | scroll_up | wait",
+      "element_to_click": "optional string from demo_flow",
+      "navigate_to": "optional URL from demo_flow",
+      "type_text": "optional text from demo_flow"
     }
   ]
 }
@@ -205,7 +206,10 @@ Rules:
 - Tone: ${tone}
 - Audience: ${understanding.target_audience}
 - Value prop: ${understanding.core_value_prop}
-- Features: ${understanding.top_5_features.join(', ')}`
+- Features: ${understanding.top_5_features.join(', ')}
+
+Here is the exact demo_flow to follow for actions:
+${JSON.stringify(understanding.demo_flow, null, 2)}`
 
   const text = await generateWithFallback(systemInstruction, prompt)
   const jsonText = extractJson(text)

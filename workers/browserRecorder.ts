@@ -3,7 +3,7 @@ import path from 'path'
 import os from 'os'
 import { chromium, type Page, type ElementHandle } from 'playwright'
 import { logger } from '../lib/logger'
-import type { DemoStep, ClickEvent } from '../types'
+import type { ClickEvent, VideoScript, ScriptSegment } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
 
@@ -345,58 +345,89 @@ async function attemptLogin(
  */
 async function executeStep(
   page: Page,
-  step: DemoStep,
+  step: ScriptSegment,
+  stepIndex: number,
   productUrl: string,
   clickEvents: ClickEvent[],
   startTime: number
 ): Promise<void> {
   const elapsed = (Date.now() - startTime) / 1000
+  const actionName = step.action || 'wait'
 
   try {
-    switch (step.action) {
+    switch (actionName) {
       case 'scroll_down':
-        await page.evaluate(() => window.scrollBy({ top: 600, behavior: 'smooth' }))
-        await page.waitForTimeout(1400)
+        await page.evaluate(() => window.scrollBy({ top: 500, behavior: 'smooth' }))
+        await page.waitForTimeout(1500)
         break
 
       case 'scroll_up':
-        await page.evaluate(() => window.scrollBy({ top: -600, behavior: 'smooth' }))
-        await page.waitForTimeout(1400)
+        await page.evaluate(() => window.scrollBy({ top: -500, behavior: 'smooth' }))
+        await page.waitForTimeout(1500)
         break
 
+      case 'navigate': {
+        const targetUrl = step.navigate_to?.startsWith('http')
+          ? step.navigate_to
+          : new URL(step.navigate_to || '', productUrl).href
+        await page.goto(targetUrl, { 
+          waitUntil: 'networkidle', 
+          timeout: 20000 
+        })
+        await page.waitForTimeout(2000)
+        await injectCustomCursor(page)
+        break
+      }
+
       case 'click': {
-        const el = await findElement(page, step.element_to_click)
-        if (el) {
-          const box = await el.boundingBox()
-          if (box) {
-            const centerX = Math.round(box.x + box.width / 2)
-            const centerY = Math.round(box.y + box.height / 2)
+        if (!step.element_to_click) break
 
-            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'click' })
+        try {
+          const locators = [
+            page.getByText(step.element_to_click, {exact: false}),
+            page.getByRole('button', {name: step.element_to_click}),
+            page.getByRole('link', {name: step.element_to_click}),
+            page.locator(`[aria-label="${step.element_to_click}"]`),
+            page.locator(`text=${step.element_to_click}`)
+          ]
 
-            await moveCursorTo(page, centerX, centerY)
-            await el.scrollIntoViewIfNeeded()
-            await page.waitForTimeout(350)
-            await triggerClickAnimation(page, centerX, centerY)
-
-            // Try normal click; fall back to direct mouse click if covered
+          let clicked = false
+          for (const loc of locators) {
             try {
-              await el.click({ timeout: 4000 })
+              const firstLocator = loc.first()
+              await firstLocator.waitFor({ state: 'visible', timeout: 3000 })
+              
+              // Embellishment: Capture click position and animate
+              const box = await firstLocator.boundingBox()
+              if (box) {
+                const centerX = Math.round(box.x + box.width / 2)
+                const centerY = Math.round(box.y + box.height / 2)
+                clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'click' })
+                await moveCursorTo(page, centerX, centerY)
+                await firstLocator.scrollIntoViewIfNeeded()
+                await page.waitForTimeout(350)
+                await triggerClickAnimation(page, centerX, centerY)
+              }
+              
+              await firstLocator.click({ timeout: 3000 })
+              clicked = true
+              logger.info(`browserRecorder: step ${stepIndex} — clicked "${step.element_to_click}"`)
+              break
             } catch {
-              logger.info(`browserRecorder: step ${step.step} — normal click failed, trying mouse.click`)
-              await page.mouse.move(centerX, centerY)
-              await page.mouse.click(centerX, centerY)
+              continue
             }
-          } else {
-            await el.click({ timeout: 4000 }).catch(() => {})
           }
 
-          // Wait for any triggered navigation or animation to settle
-          await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
-          await page.waitForTimeout(2000)
+          if (!clicked) {
+            logger.warn(`browserRecorder: step ${stepIndex} — failed to click "${step.element_to_click}"`)
+          }
+
+          await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+          await page.waitForTimeout(1500)
           await injectCustomCursor(page)
-        } else {
-          logger.warn(`browserRecorder: step ${step.step} — click target "${step.element_to_click}" not found, skipping`)
+
+        } catch (err) {
+          logger.warn(`browserRecorder: step ${stepIndex} — overarching click error for "${step.element_to_click}"`, { err })
         }
         break
       }
@@ -433,33 +464,21 @@ async function executeStep(
             await triggerClickAnimation(page, centerX, centerY)
             await el.click()
           }
-          await page.keyboard.type(step.type_text ?? step.description ?? 'hello', { delay: 75 })
+          await page.keyboard.type(step.type_text ?? 'hello', { delay: 75 })
           await page.waitForTimeout(1600)
         }
         break
       }
 
-      case 'navigate': {
-        if (!step.navigate_to) break
-        const targetUrl = step.navigate_to.startsWith('http')
-          ? step.navigate_to
-          : new URL(step.navigate_to, productUrl).href
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        await page.waitForLoadState('load', { timeout: 8000 }).catch(() => {})
-        await injectCustomCursor(page)
-        await page.waitForTimeout(2000)
-        break
-      }
-
       case 'wait':
-        await page.waitForTimeout(2200)
+        await page.waitForTimeout(3000)
         break
 
       default:
-        logger.warn(`browserRecorder.executeStep: unknown action "${step.action}"`)
+        logger.warn(`browserRecorder.executeStep: unknown action "${actionName}"`)
     }
   } catch (error) {
-    logger.warn(`browserRecorder.executeStep: step ${step.step} (${step.action}) failed, skipping`, { error })
+    logger.warn(`browserRecorder.executeStep: step ${stepIndex} (${actionName}) failed, skipping`, { error })
   }
 }
 
@@ -478,7 +497,7 @@ async function executeStep(
  */
 export async function recordProduct(
   productUrl: string,
-  demoFlow: DemoStep[],
+  script: VideoScript,
   jobId: string,
   credentials?: { username: string; password: string }
 ): Promise<string> {
@@ -536,7 +555,7 @@ export async function recordProduct(
     // ─── Navigate ───
     logger.info(`browserRecorder: navigating to ${productUrl}`)
     const response = await page.goto(productUrl, {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle',
       timeout: 60000,
     })
     if (!response || !response.ok()) {
@@ -544,8 +563,9 @@ export async function recordProduct(
     }
 
     // Wait for full page load + JS rendering behind the overlay
-    await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {})
-    await page.waitForTimeout(3500)
+    await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+    await page.waitForTimeout(3000)
 
     // Fade out the dark loading overlay — site is now fully rendered beneath it
     await fadeOutOverlay(page)
@@ -562,21 +582,23 @@ export async function recordProduct(
       await injectCustomCursor(page)
     }
 
-    // Brief pause before starting interactions
+    // Briefly pause before interactions
     await page.waitForTimeout(1200)
 
     const recordingStartTime = Date.now()
 
     // ─── Execute Demo Flow ───
-    logger.info(`browserRecorder: executing ${demoFlow.length} demo steps`)
-    for (const step of demoFlow) {
-      logger.info(`browserRecorder: step ${step.step} — ${step.action}: ${step.description}`)
-      await executeStep(page, step, productUrl, clickEvents, recordingStartTime)
-      await page.waitForTimeout(800)
+    logger.info(`browserRecorder: executing ${script.segments.length} demo steps`)
+    let stepIndex = 1
+    for (const segment of script.segments) {
+      logger.info(`browserRecorder: step ${stepIndex} — ${segment.action}: ${segment.what_to_show}`)
+      await executeStep(page, segment, stepIndex, productUrl, clickEvents, recordingStartTime)
+      await page.waitForTimeout(1200)
+      stepIndex++
     }
 
     // Final pause to capture the last frame cleanly
-    await page.waitForTimeout(2000)
+    await page.waitForTimeout(4000)
     await context.close()
   } finally {
     await browser.close()

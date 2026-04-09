@@ -28,18 +28,18 @@ const STAGES: Stage[] = [
     tip: 'Our AI is studying your product like a first-time user — figuring out what to show and in what order.',
   },
   {
-    label: 'Recording the demo',
-    description: 'Opening your product in a real browser and navigating it step-by-step',
-    startsAt: 15,
-    estimatedSeconds: 180,
-    tip: 'A real headless Chrome browser is visiting your product right now — no fake AI-generated screens.',
-  },
-  {
     label: 'Writing the script',
-    description: 'Crafting a professional narration timed to match the recording',
-    startsAt: 35,
+    description: 'Crafting a professional narration and generating browser instructions',
+    startsAt: 15,
     estimatedSeconds: 40,
     tip: 'Scripts are written in the style of top ProductHunt launch videos — punchy, clear, persuasive.',
+  },
+  {
+    label: 'Recording the demo',
+    description: 'Opening your product in a real browser and navigating it step-by-step',
+    startsAt: 35,
+    estimatedSeconds: 180,
+    tip: 'A real headless Chrome browser is visiting your product right now — no fake AI-generated screens.',
   },
   {
     label: 'Generating voiceover',

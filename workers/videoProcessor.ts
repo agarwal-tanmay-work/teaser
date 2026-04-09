@@ -88,8 +88,8 @@ async function fetchInternal<T>(
  *
  * Stages:
  *   Stage 1 (0-15%):  Product understanding via Firecrawl + Gemini
- *   Stage 2 (15-35%): Browser recording via Playwright
- *   Stage 3 (35-55%): Script generation via Gemini
+ *   Stage 2 (15-35%): Script generation via Gemini
+ *   Stage 3 (35-55%): Browser recording via Playwright
  *   Stage 4 (55-70%): Voiceover generation via ElevenLabs
  *   Stage 5 (70-90%): Video assembly via FFmpeg
  *   Stage 6 (90-100%): Upload to Supabase Storage + cleanup
@@ -122,21 +122,9 @@ const worker = new Worker<VideoJobQueueData>(
         .update({ product_understanding: understanding })
         .eq('id', jobId)
 
-      await updateProgress(jobId, 15, 'Got it. Planning the demo recording...')
+      await updateProgress(jobId, 15, 'Got it. Writing your script...')
 
-      // ─── STAGE 2: Browser Recording (15 → 35%) ────────────────────────────
-      await updateProgress(jobId, 20, 'Opening your product in our browser...')
-
-      recordingPath = await recordProduct(
-        product_url,
-        understanding.demo_flow,
-        jobId,
-        credentials
-      )
-
-      await updateProgress(jobId, 35, 'Demo recorded. Writing your script...')
-
-      // ─── STAGE 3: Script Generation (35 → 55%) ────────────────────────────
+      // ─── STAGE 2: Script Generation (15 → 35%) ────────────────────────────
       const script = await fetchInternal<VideoScript>(
         `${appUrl}/api/videos/script`,
         { product_understanding: understanding, tone, video_length }
@@ -147,7 +135,17 @@ const worker = new Worker<VideoJobQueueData>(
         .update({ script })
         .eq('id', jobId)
 
-      await updateProgress(jobId, 55, 'Script ready. Generating your voiceover...')
+      await updateProgress(jobId, 35, 'Script ready. Opening your product in our browser...')
+
+      // ─── STAGE 3: Browser Recording (35 → 55%) ────────────────────────────
+      recordingPath = await recordProduct(
+        product_url,
+        script,
+        jobId,
+        credentials
+      )
+
+      await updateProgress(jobId, 55, 'Demo recorded. Generating your voiceover...')
 
       // ─── STAGE 4: Voiceover Generation (55 → 70%) ─────────────────────────
       fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })

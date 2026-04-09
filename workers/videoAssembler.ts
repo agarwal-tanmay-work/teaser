@@ -439,8 +439,9 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       ffmpeg(recordingPath)
         .noAudio()
         .videoCodec('libx264')
+        .videoFilter(['eq=contrast=1.1:brightness=-0.05:saturation=1.2', 'unsharp=5:5:0.8:3:3:0.4'])
         .outputOptions([
-          '-crf 16', '-preset veryfast', '-r 30', '-pix_fmt yuv420p',
+          '-crf 18', '-preset slow', '-profile:v high', '-r 30', '-pix_fmt yuv420p',
           // Preserve BT.709 colour space — prevents washed-out / desaturated output
           '-colorspace bt709', '-color_primaries bt709', '-color_trc bt709',
         ])
@@ -506,16 +507,12 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
 
         return wrappedLines.map((line, i) => {
           const text    = escapeForFilterScript(line)
-          const yOffset = 60 + (wrappedLines.length - 1 - i) * 44
-          // No black box — bright white text with a dark outline + drop shadow
-          // makes captions readable on any background without a pill.
+          const yPos = wrappedLines.length > 1 ? `h*0.85+${i*34}` : `h*0.85`
           return (
-            `drawtext=text='${text}'` +
-            `:enable='between(t,${start},${end})'` +
-            `:fontsize=38:fontcolor=white` +
-            `:x=(w-text_w)/2:y=h-th-${yOffset}` +
-            `:bordercolor=black:borderw=3` +
-            `:shadowcolor=black:shadowx=2:shadowy=2`
+            `drawtext=text='${text}':fontsize=28:fontcolor=white:` +
+            `borderw=2:bordercolor=black:box=0:` +
+            `x=(w-text_w)/2:y=${yPos}:` +
+            `enable='between(t,${start},${end})'`
           )
         })
       })
@@ -574,9 +571,9 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       '-map', '[aout]',
       '-c:v', 'libx264',
       '-c:a', 'aac',
-      // CRF 16 + slow preset = maximum quality at efficient bitrate
-      '-crf', '16',
+      '-crf', '18',
       '-preset', 'slow',
+      '-profile:v', 'high',
       // Bitrate floor so fast scenes don't drop below broadcast quality
       '-b:v', '8000k',
       '-maxrate', '12000k',

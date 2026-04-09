@@ -77,8 +77,8 @@ async function markFailed(jobId: string, message: string): Promise<void> {
  * Stages:
  *   5%   Reading product (Firecrawl)
  *   15%  Understanding product (Gemini)
- *   20%  Recording demo (Playwright)
- *   35%  Writing script (Gemini)
+ *   20%  Writing script (Gemini)
+ *   35%  Recording demo (Playwright)
  *   55%  Generating voiceover (ElevenLabs)
  *   70%  Assembling video (FFmpeg)
  *   90%  Uploading to Supabase Storage
@@ -195,23 +195,8 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     await db.from('video_jobs').update({ product_understanding: understanding }).eq('id', jobId)
     await updateProgress(jobId, 15, 'Product understood. Planning the demo...')
 
-    // ── Stage 2: Record (15 → 35%) ────────────────────────────────────────
-    await updateProgress(jobId, 20, 'Opening your product in a real browser...')
-    try {
-      const { recordProduct } = await import('@/workers/browserRecorder')
-      recordingPath = await recordProduct(productUrl, understanding.demo_flow, jobId, credentials)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(
-        msg.includes('Executable') || msg.includes('browser') || msg.includes('chromium')
-          ? 'Playwright browser not found. Run: npx playwright install chromium'
-          : `Browser recording failed: ${msg}`
-      )
-    }
-    await updateProgress(jobId, 35, 'Demo recorded. Writing the script...')
-
-    // ── Stage 3: Script (35 → 55%) ────────────────────────────────────────
-    await updateProgress(jobId, 40, 'Writing your video script with AI...')
+    // ── Stage 2: Script (15 → 35%) ────────────────────────────────────────
+    await updateProgress(jobId, 20, 'Writing your video script with AI...')
     let script: VideoScript
     try {
       script = await generateScript(understanding, tone, video_length)
@@ -222,7 +207,21 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
       )
     }
     await db.from('video_jobs').update({ script }).eq('id', jobId)
-    await updateProgress(jobId, 55, 'Script ready. Generating voiceover...')
+    await updateProgress(jobId, 35, 'Script ready. Opening your product in a real browser...')
+
+    // ── Stage 3: Record (35 → 55%) ────────────────────────────────────────
+    try {
+      const { recordProduct } = await import('@/workers/browserRecorder')
+      recordingPath = await recordProduct(productUrl, script, jobId, credentials)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        msg.includes('Executable') || msg.includes('browser') || msg.includes('chromium')
+          ? 'Playwright browser not found. Run: npx playwright install chromium'
+          : `Browser recording failed: ${msg}`
+      )
+    }
+    await updateProgress(jobId, 55, 'Demo recorded. Generating voiceover...')
 
     // ── Stage 4: Voiceover (55 → 70%) ─────────────────────────────────────
     await updateProgress(jobId, 58, 'Converting script to natural voice...')

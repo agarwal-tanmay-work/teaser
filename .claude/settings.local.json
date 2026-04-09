@@ -26,7 +26,14 @@
       "Bash(cmd.exe:*)",
       "Bash(powershell.exe:*)",
       "Bash(npm run:*)",
-      "Bash(grep -v \"^#\\\\|^$\\\\|KEY\\\\|TOKEN\\\\|SECRET\\\\|PASSWORD\" \"/c/Users/priya/OneDrive/Desktop/teaser/.env.local\")"
+      "Bash(grep -v \"^#\\\\|^$\\\\|KEY\\\\|TOKEN\\\\|SECRET\\\\|PASSWORD\" \"/c/Users/priya/OneDrive/Desktop/teaser/.env.local\")",
+      "Bash(xargs ls:*)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(kill 892)",
+      "Bash(npx ts-node:*)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(npx next:*)"
     ]
   }
 }
