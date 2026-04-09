@@ -89,18 +89,46 @@ export async function understandProduct(
   "demo_flow": [
     {
       "step": 1,
-      "action": "navigate",
-      "description": "string",
-      "element_to_click": "string (optional)",
-      "navigate_to": "string (optional)"
+      "action": "navigate | click | scroll_down | scroll_up | wait | hover | type",
+      "description": "string (what this step demonstrates to the viewer)",
+      "element_to_click": "string (CSS selector, button text, or aria-label — required for click/hover/type)",
+      "navigate_to": "string (full URL or relative path — required for navigate)",
+      "type_text": "string (text to type — required for type action)"
     }
   ]
 }
 
+CRITICAL INSTRUCTIONS FOR demo_flow:
+You MUST generate a COMPREHENSIVE, INTERACTIVE demo flow with 10–20 steps.
+The goal is to create a professional product tour video — NOT just scroll the landing page.
+
+MANDATORY REQUIREMENTS:
+1. Start by navigating to the product URL and waiting for load
+2. Scroll through the hero section to show the main value proposition
+3. Click the MAIN CTA button (e.g., "Get Started", "Try Free", "Sign Up", "Learn More")
+4. Navigate to at least 2-3 internal pages (pricing, features, about, dashboard, docs)
+5. Click on feature cards, tabs, toggles, accordions, or interactive demos on each page
+6. Hover over elements that have tooltips, dropdowns, or hover animations
+7. If there's a search bar or input field, type a relevant search query
+8. Show the product's core workflow or main feature in action
+9. Click through any onboarding steps, modals, or interactive guides
+10. Return to the homepage for a final hero shot
+
+STEP GUIDELINES:
+- Use "click" action for buttons, links, tabs, cards, menu items, toggles
+- Use "hover" action for elements with hover effects, tooltips, dropdown menus
+- Use "type" action for search bars, input fields, forms (provide type_text)
+- Use "navigate" action to go to specific URLs/pages directly
+- Use "scroll_down" to reveal content below the fold
+- Use "scroll_up" to return to top
+- Use "wait" after complex interactions to let animations/content load
+- For element_to_click, prefer descriptive text like "Get Started" or "Pricing" over CSS selectors
+- Make the flow feel like a REAL USER exploring the product naturally
+
 Product URL: ${productUrl}
 User description: ${description ?? 'Not provided'}
 Scraped content:
-${scrapedContent.slice(0, 10000)}`
+${scrapedContent.slice(0, 12000)}`
 
   const text = await generateWithFallback(systemInstruction, prompt)
   const jsonText = extractJson(text)

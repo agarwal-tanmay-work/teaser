@@ -8,7 +8,7 @@ export type VideoTone = 'professional' | 'conversational' | 'energetic'
 export type VideoLength = 30 | 60 | 90
 
 /** Actions available in a demo flow step */
-export type DemoAction = 'scroll_down' | 'scroll_up' | 'click' | 'navigate' | 'wait'
+export type DemoAction = 'scroll_down' | 'scroll_up' | 'click' | 'navigate' | 'wait' | 'hover' | 'type'
 
 /** A single step in the automated demo recording flow */
 export interface DemoStep {
@@ -17,6 +17,15 @@ export interface DemoStep {
   description: string
   element_to_click?: string
   navigate_to?: string
+  type_text?: string
+}
+
+/** Recorded click/interaction event for post-processing zoom effects */
+export interface ClickEvent {
+  x: number
+  y: number
+  timestamp: number
+  action: string
 }
 
 /** Structured understanding of a product extracted by Gemini */

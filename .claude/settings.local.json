@@ -24,7 +24,9 @@
       "Bash(/c/Users/priya/AppData/Roaming/npm/pnpm.cmd dev:*)",
       "Bash(/c/Users/priya/AppData/Roaming/npm/npx.cmd playwright:*)",
       "Bash(cmd.exe:*)",
-      "Bash(powershell.exe:*)"
+      "Bash(powershell.exe:*)",
+      "Bash(npm run:*)",
+      "Bash(grep -v \"^#\\\\|^$\\\\|KEY\\\\|TOKEN\\\\|SECRET\\\\|PASSWORD\" \"/c/Users/priya/OneDrive/Desktop/teaser/.env.local\")"
     ]
   }
 }
