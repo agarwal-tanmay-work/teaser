@@ -12,7 +12,18 @@ What Is Built:
 - Phase 8: .env.local.example, README.md, final reviewer pass and fixes
 - Phase 9: Video pipeline overhaul — 1080p, rich interaction, premium output
 - Phase 10: Full quality & interaction overhaul — smooth rendering, animated cursor, multi-click zoom, drop shadow, higher quality encoding
-Recent Overhaul (Phase 10):
+- Phase 11: Pipeline Reorder (Script before Record) & Bug Fixes (Playwright navigation, FFmpeg contrast/sharpen, caption styling)
+Recent Overhaul (Phase 11):
+Video Pipeline Reordering:
+- Changed pipeline execution order: Understand -> Script -> Record -> Voiceover -> Edit -> Upload.
+- Playwright now receives the generated `VideoScript` directly and acts on precise segments derived from `what_to_show`.
+Browser Recorder (workers/browserRecorder.ts):
+- Squashed Bug 1: Added `networkidle` enforcement immediately after page `goto` with an additional `3000ms` wait to prevent recording blank white screens.
+- Squashed Bug 4: Enforced a precise sequence of locators for `click` with failover strategies, preserving site interaction tracking. Added `waitForLoadState` explicitly.
+Video Assembler (workers/videoAssembler.ts):
+- Squashed Bug 2: Applied FFmpeg video filters (`eq=contrast=1.1:brightness=-0.05:saturation=1.2,unsharp=5:5:0.8:3:3:0.4`) during WebM parsing. 
+- Updated final encoding to `-crf 18`, `-preset slow`, `-profile:v high`.
+- Squashed Bug 3: Restyled captions exactly to user specification (`fontsize=28:fontcolor=white:borderw=2:bordercolor=black:box=0:y=h*0.85`).
 Browser Recorder (workers/browserRecorder.ts):
 - REMOVED --disable-gpu-compositing and --disable-features=VizDisplayCompositor — these were killing render quality and causing frame drops
 - Added --use-gl=swiftshader, --disable-background-timer-throttling, --disable-renderer-backgrounding for smooth consistent rendering
@@ -42,8 +53,8 @@ What Works:
 - Auto-zoom on ALL click events (up to 6) not just first
 - Drop shadow behind browser window in framed composition
 - CRF 16 / slow preset / bitrate floor for maximum 1080p quality
-What Is Broken: Nothing known. E2E test pending with real product URL.
-Current Focus: Ready for end-to-end testing
+What Is Broken: Nothing known. Complete pipeline reorder & video quality fixes successfully integrated.
+Current Focus: E2E testing of the reordered Script -> Record pipeline.
 Next Actions:
 1. Run pnpm dev + pnpm worker and test with a real product URL
 2. Verify cursor animations visible in recording
