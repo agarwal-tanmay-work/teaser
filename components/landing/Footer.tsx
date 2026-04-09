@@ -1,176 +1,84 @@
-'use client'
+"use client"
 
-import { motion } from 'framer-motion'
+import { useState } from 'react'
 
-const productLinks = ['How it works', 'Showcase', 'Pricing', 'Templates']
-const companyLinks = ['About Us', 'Careers', 'Blog', 'Contact']
-
-/** Site footer matching the reference design — 4-column layout with gradient logo. */
 export default function Footer() {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+
+  const handleSubscribe = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!email) return
+    setStatus('loading')
+
+    try {
+      const res = await fetch('/api/waitlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      })
+      if (res.ok) setStatus('success')
+      else setStatus('error')
+    } catch {
+      setStatus('error')
+    }
+  }
+
   return (
-    <footer
-      style={{
-        background: '#000000',
-        borderTop: '1px solid rgba(70,72,75,0.1)',
-        padding: '80px 32px',
-      }}
-    >
-      <div
-        className="grid gap-12"
-        style={{
-          maxWidth: '1440px',
-          margin: '0 auto',
-          gridTemplateColumns: 'repeat(1, 1fr)',
-        }}
-      >
-        {/* Use CSS grid via inline + responsive class */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-12">
-          {/* Brand */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            whileInView={{ opacity: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.5 }}
-            className="space-y-4"
-          >
-            <span
-              className="text-2xl font-extrabold ai-energy-text"
-              style={{ fontFamily: 'var(--font-manrope)' }}
+    <footer className="bg-surface-container-lowest border-t border-outline-variant/10 py-20 px-8">
+      <div className="max-w-[1440px] mx-auto grid grid-cols-1 md:grid-cols-4 gap-12">
+        <div className="space-y-6">
+          <span className="text-2xl font-headline font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-primary to-secondary">Teaser</span>
+          <p className="text-on-surface-variant text-sm font-body leading-relaxed">The world's first autonomous video production engine for software founders. Professional results in minutes.</p>
+        </div>
+        <div>
+          <h4 className="font-headline font-bold mb-6">Product</h4>
+          <ul className="space-y-4 text-on-surface-variant text-sm font-body">
+            <li><a className="hover:text-primary transition-colors" href="#">How it works</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Showcase</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Pricing</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Templates</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 className="font-headline font-bold mb-6">Company</h4>
+          <ul className="space-y-4 text-on-surface-variant text-sm font-body">
+            <li><a className="hover:text-primary transition-colors" href="#">About Us</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Careers</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Blog</a></li>
+            <li><a className="hover:text-primary transition-colors" href="#">Contact</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 className="font-headline font-bold mb-6">Stay Updated</h4>
+          <form onSubmit={handleSubscribe} className="flex gap-2">
+            <input 
+              required
+              type="email" 
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              disabled={status === 'success'}
+              className="bg-surface-container border border-outline-variant/15 rounded-lg px-4 py-2 text-sm w-full focus:ring-1 focus:ring-primary outline-none text-on-surface" 
+              placeholder="Email address" 
+            />
+            <button 
+              type="submit"
+              disabled={status === 'loading' || status === 'success'}
+              className="bg-primary text-on-primary-fixed px-4 py-2 rounded-lg font-bold disabled:opacity-50"
             >
-              Teaser
-            </span>
-            <p style={{ color: '#aaabaf', fontSize: '0.875rem', lineHeight: 1.7 }}>
-              The world&apos;s first autonomous video production engine for software founders.
-              Professional results in minutes.
-            </p>
-          </motion.div>
-
-          {/* Product */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            whileInView={{ opacity: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.5, delay: 0.05 }}
-          >
-            <h4
-              className="font-bold mb-6"
-              style={{ color: '#f9f9fd', fontFamily: 'var(--font-manrope)' }}
-            >
-              Product
-            </h4>
-            <ul className="space-y-4">
-              {productLinks.map((label) => (
-                <li key={label}>
-                  <a
-                    href="#"
-                    style={{ color: '#aaabaf', fontSize: '0.875rem', transition: 'color 0.2s' }}
-                    onMouseEnter={(e) => (e.currentTarget.style.color = '#b6a0ff')}
-                    onMouseLeave={(e) => (e.currentTarget.style.color = '#aaabaf')}
-                  >
-                    {label}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </motion.div>
-
-          {/* Company */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            whileInView={{ opacity: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.5, delay: 0.1 }}
-          >
-            <h4
-              className="font-bold mb-6"
-              style={{ color: '#f9f9fd', fontFamily: 'var(--font-manrope)' }}
-            >
-              Company
-            </h4>
-            <ul className="space-y-4">
-              {companyLinks.map((label) => (
-                <li key={label}>
-                  <a
-                    href="#"
-                    style={{ color: '#aaabaf', fontSize: '0.875rem', transition: 'color 0.2s' }}
-                    onMouseEnter={(e) => (e.currentTarget.style.color = '#b6a0ff')}
-                    onMouseLeave={(e) => (e.currentTarget.style.color = '#aaabaf')}
-                  >
-                    {label}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </motion.div>
-
-          {/* Stay Updated */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            whileInView={{ opacity: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.5, delay: 0.15 }}
-          >
-            <h4
-              className="font-bold mb-6"
-              style={{ color: '#f9f9fd', fontFamily: 'var(--font-manrope)' }}
-            >
-              Stay Updated
-            </h4>
-            <div className="flex gap-2">
-              <input
-                type="email"
-                placeholder="Email address"
-                className="flex-1 min-w-0 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-[#b6a0ff]"
-                style={{
-                  background: '#171a1d',
-                  border: '1px solid rgba(70,72,75,0.20)',
-                  color: '#f9f9fd',
-                }}
-              />
-              <button
-                className="ai-energy-gradient font-bold px-4 py-2 rounded-xl text-sm shrink-0"
-                style={{ color: '#000', fontFamily: 'var(--font-manrope)' }}
-              >
-                Join
-              </button>
-            </div>
-          </motion.div>
+              Join
+            </button>
+          </form>
+          {status === 'success' && <p className="text-primary text-xs mt-2 font-label">Subscribed successfully!</p>}
+          {status === 'error' && <p className="text-error text-xs mt-2 font-label">Error subscribing.</p>}
         </div>
       </div>
-
-      {/* Bottom bar */}
-      <div
-        style={{
-          maxWidth: '1440px',
-          margin: '80px auto 0',
-          paddingTop: '32px',
-          borderTop: '1px solid rgba(70,72,75,0.1)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '16px',
-          alignItems: 'center',
-        }}
-        className="md:flex-row md:justify-between"
-      >
-        <p
-          className="text-xs uppercase tracking-widest"
-          style={{ color: '#aaabaf', fontFamily: 'var(--font-space-grotesk)' }}
-        >
-          © 2024 Ethereal Automaton Inc.
-        </p>
-        <div className="flex gap-8">
-          {['Privacy Policy', 'Terms of Service', 'Status'].map((label) => (
-            <a
-              key={label}
-              href="#"
-              className="text-xs uppercase tracking-widest transition-colors duration-200"
-              style={{ color: '#aaabaf', fontFamily: 'var(--font-space-grotesk)' }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = '#f9f9fd')}
-              onMouseLeave={(e) => (e.currentTarget.style.color = '#aaabaf')}
-            >
-              {label}
-            </a>
-          ))}
+      <div className="max-w-[1440px] mx-auto mt-20 pt-8 border-t border-outline-variant/10 flex flex-col md:flex-row justify-between items-center gap-6">
+        <p className="text-on-surface-variant text-xs font-label uppercase tracking-widest">© 2024 Ethereal Automaton Inc.</p>
+        <div className="flex gap-8 text-xs font-label text-on-surface-variant uppercase tracking-widest">
+          <a className="hover:text-white transition-colors" href="#">Privacy Policy</a>
+          <a className="hover:text-white transition-colors" href="#">Terms of Service</a>
+          <a className="hover:text-white transition-colors" href="#">Status</a>
         </div>
       </div>
     </footer>

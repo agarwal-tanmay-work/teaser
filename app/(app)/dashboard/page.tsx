@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import VideoForm from '@/components/dashboard/VideoForm'
 import ProgressTracker from '@/components/dashboard/ProgressTracker'
 
@@ -18,7 +18,9 @@ export default function DashboardPage() {
       </div>
 
       {/* Video generation form */}
-      <VideoForm onJobCreated={(jobId) => setActiveJobId(jobId)} />
+      <Suspense fallback={<div className="h-64 animate-pulse bg-[#111] rounded-lg"></div>}>
+        <VideoForm onJobCreated={(jobId) => setActiveJobId(jobId)} />
+      </Suspense>
 
       {/* Progress tracker — shown only when a job is active */}
       {activeJobId && (

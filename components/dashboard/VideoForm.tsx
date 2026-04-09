@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import type { VideoLength, VideoTone, ApiResponse, VideoCreateResponse } from '@/types'
 
 interface VideoFormProps {
@@ -11,7 +12,7 @@ interface VideoFormProps {
 function isValidUrl(url: string): boolean {
   try {
     const parsed = new URL(url)
-    return parsed.protocol === 'https:'
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
   } catch {
     return false
   }
@@ -22,7 +23,10 @@ function isValidUrl(url: string): boolean {
  * Calls POST /api/videos/create on submit and reports the job ID via onJobCreated.
  */
 export default function VideoForm({ onJobCreated }: VideoFormProps) {
-  const [url, setUrl] = useState('')
+  const searchParams = useSearchParams()
+  const initialUrl = searchParams.get('url') || ''
+
+  const [url, setUrl] = useState(initialUrl)
   const [description, setDescription] = useState('')
   const [videoLength, setVideoLength] = useState<VideoLength>(60)
   const [tone, setTone] = useState<VideoTone>('professional')

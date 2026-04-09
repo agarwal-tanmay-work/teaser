@@ -4,14 +4,15 @@ import Features from '@/components/landing/Features'
 import Waitlist from '@/components/landing/Waitlist'
 import Footer from '@/components/landing/Footer'
 
-/** The public-facing landing page for Teaser. */
 export default function LandingPage() {
   return (
-    <main className="min-h-screen" style={{ background: '#0c0e11' }}>
+    <main className="min-h-screen bg-transparent overflow-x-hidden">
       <Navbar />
-      <Hero />
-      <Features />
-      <Waitlist />
+      <div className="pt-16">
+        <Hero />
+        <Features />
+        <Waitlist />
+      </div>
       <Footer />
     </main>
   )

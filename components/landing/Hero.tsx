@@ -1,335 +1,115 @@
-'use client'
+"use client"
 
-import { motion } from 'framer-motion'
+import Link from 'next/link'
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 
-/** Hero section matching the Ethereal Automaton reference design exactly. */
 export default function Hero() {
-  /** Smoothly scrolls to the #waitlist section. */
-  function scrollToWaitlist() {
-    document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' })
+  const [url, setUrl] = useState('')
+  const router = useRouter()
+
+  const handleCreateVideo = () => {
+    if (url.trim()) {
+      router.push(`/dashboard?url=${encodeURIComponent(url.trim())}`)
+    } else {
+      router.push('/dashboard')
+    }
+  }
+
+  const handleOpenLink = () => {
+    if (url.trim() && (url.startsWith('https://') || url.startsWith('http://'))) {
+      window.open(url, '_blank')
+    }
   }
 
   return (
-    <section
-      className="relative flex flex-col items-center justify-center px-6 text-center overflow-hidden"
-      style={{ minHeight: '921px', paddingTop: '64px' }}
-    >
-      {/* Background glow orbs */}
-      <div
-        className="absolute pointer-events-none"
-        style={{
-          top: '25%',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          width: '800px',
-          height: '400px',
-          background: 'rgba(182,160,255,0.10)',
-          filter: 'blur(120px)',
-          borderRadius: '50%',
-          zIndex: 0,
-        }}
-      />
-      <div
-        className="absolute pointer-events-none"
-        style={{
-          bottom: '25%',
-          left: '33%',
-          width: '600px',
-          height: '300px',
-          background: 'rgba(0,227,253,0.05)',
-          filter: 'blur(100px)',
-          borderRadius: '50%',
-          zIndex: 0,
-        }}
-      />
-
-      <div className="relative z-10 max-w-4xl mx-auto flex flex-col items-center gap-8">
-        {/* Badge */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full"
-          style={{
-            background: '#111417',
-            border: '1px solid rgba(70,72,75,0.15)',
-          }}
-        >
-          <span
-            className="w-2 h-2 rounded-full shrink-0"
-            style={{
-              background: '#ff59e3',
-              boxShadow: '0 0 8px #ff05e5',
-              animation: 'pulse 2s infinite',
-            }}
-          />
-          <span
-            className="text-xs uppercase tracking-widest"
-            style={{ color: '#aaabaf', fontFamily: 'var(--font-space-grotesk)' }}
-          >
-            Zero effort, under 10 minutes
-          </span>
-        </motion.div>
-
-        {/* Headline */}
-        <motion.h1
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, delay: 0.1 }}
-          className="font-extrabold tracking-tighter leading-[1.1]"
-          style={{
-            fontSize: 'clamp(3rem, 6.5vw, 5.5rem)',
-            fontFamily: 'var(--font-manrope)',
-            color: '#f9f9fd',
-          }}
-        >
-          URL in.{' '}
-          <br />
-          <span className="ai-energy-text">Professional launch video</span>{' '}out.
-        </motion.h1>
-
-        {/* Subtext */}
-        <motion.p
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, delay: 0.2 }}
-          className="text-lg md:text-xl leading-relaxed max-w-2xl"
-          style={{ color: '#aaabaf' }}
-        >
-          0 editing skills. 0 screen recording. 0 agency.
-          <br className="hidden md:block" />
+    <section className="relative min-h-[921px] flex flex-col items-center justify-center px-6 text-center">
+      {/* Background Magic */}
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -z-10 w-[800px] h-[400px] bg-primary/10 blur-[120px] rounded-full"></div>
+      <div className="absolute bottom-1/4 left-1/3 -z-10 w-[600px] h-[300px] bg-secondary/5 blur-[100px] rounded-full"></div>
+      
+      <div className="max-w-4xl mx-auto space-y-8">
+        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-surface-container-low border border-outline-variant/15">
+          <span className="w-2 h-2 rounded-full bg-tertiary animate-pulse shadow-[0_0_8px_#ff05e5]"></span>
+          <span className="font-label text-xs uppercase tracking-widest text-on-surface-variant">Zero effort, under 10 minutes</span>
+        </div>
+        <h1 className="text-5xl md:text-7xl lg:text-8xl font-headline font-extrabold tracking-tighter leading-[1.1]">
+          URL in. <br />
+          <span className="ai-energy-text">Professional launch video</span> out.
+        </h1>
+        <p className="text-lg md:text-xl text-on-surface-variant font-body max-w-2xl mx-auto leading-relaxed">
+          0 editing skills. 0 screen recording. 0 agency. <br className="hidden md:block" />
           Transform your product link into a cinematic masterpiece instantly.
-        </motion.p>
-
-        {/* CTAs */}
-        <motion.div
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, delay: 0.3 }}
-          className="flex flex-col sm:flex-row gap-4 items-center"
-        >
-          <motion.button
-            onClick={scrollToWaitlist}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.97 }}
-            className="ai-energy-gradient font-extrabold"
-            style={{
-              padding: '16px 32px',
-              borderRadius: '12px',
-              color: '#000',
-              fontFamily: 'var(--font-manrope)',
-              fontSize: '1rem',
-              boxShadow: '0 8px 32px rgba(182,160,255,0.25)',
-            }}
-          >
+        </p>
+        <div className="flex flex-col sm:flex-row gap-4 justify-center items-center pt-4">
+          <button onClick={handleCreateVideo} className="ai-energy-gradient px-8 py-4 rounded-xl font-headline font-bold text-on-primary-fixed hover:scale-105 transition-transform shadow-lg shadow-primary/20 block">
             Get Started for Free
-          </motion.button>
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.97 }}
-            className="font-bold"
-            style={{
-              padding: '16px 32px',
-              borderRadius: '12px',
-              color: '#f9f9fd',
-              fontFamily: 'var(--font-manrope)',
-              fontSize: '1rem',
-              background: '#292c31',
-              border: '1px solid rgba(70,72,75,0.15)',
-            }}
-          >
+          </button>
+          <a href="#view-showreel" className="px-8 py-4 rounded-xl font-headline font-bold text-on-surface bg-surface-bright border border-outline-variant/15 hover:bg-surface-container transition-colors block">
             View Showreel
-          </motion.button>
-        </motion.div>
+          </a>
+        </div>
       </div>
 
       {/* Transformation Visual */}
-      <motion.div
-        initial={{ opacity: 0, y: 48 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.9, delay: 0.55, ease: [0.16, 1, 0.3, 1] }}
-        className="relative z-10 mt-16 w-full max-w-5xl mx-auto px-4"
-      >
-        {/* Floating accent orbs */}
-        <div
-          className="absolute pointer-events-none hidden lg:block"
-          style={{
-            top: '-48px',
-            right: '-48px',
-            width: '192px',
-            height: '192px',
-            background: 'rgba(255,89,227,0.10)',
-            filter: 'blur(60px)',
-            borderRadius: '50%',
-          }}
-        />
-        <div
-          className="absolute pointer-events-none hidden lg:block"
-          style={{
-            bottom: '-32px',
-            left: '-32px',
-            width: '256px',
-            height: '256px',
-            background: 'rgba(0,227,253,0.10)',
-            filter: 'blur(80px)',
-            borderRadius: '50%',
-          }}
-        />
-
-        {/* Main card wrapper */}
-        <div
-          style={{
-            background: '#111417',
-            borderRadius: '16px',
-            border: '1px solid rgba(70,72,75,0.15)',
-            boxShadow: '0 40px 80px rgba(0,0,0,0.6)',
-            padding: '8px',
-            position: 'relative',
-            zIndex: 10,
-          }}
-        >
+      <div className="mt-20 w-full max-w-5xl mx-auto relative px-4" id="view-showreel">
+        <div className="bg-surface-container-low p-2 rounded-2xl border border-outline-variant/15 shadow-2xl relative z-10">
           <div className="flex flex-col lg:flex-row gap-4 items-stretch">
-
-            {/* Input side */}
-            <div
-              className="flex-1 flex flex-col justify-center gap-6 p-8"
-              style={{ background: '#171a1d', borderRadius: '12px' }}
-            >
+            {/* Input Side */}
+            <div className="flex-1 bg-surface-container rounded-xl p-8 flex flex-col justify-center gap-6">
               <div className="flex items-center gap-3">
-                <div
-                  className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ background: '#1d2024' }}
-                >
-                  <svg className="w-5 h-5" style={{ color: '#00e3fd' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                  </svg>
-                </div>
+                <button title="Open this website" onClick={handleOpenLink} className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center hover:scale-105 transition-transform cursor-pointer shadow-md">
+                  <span className="material-symbols-outlined text-secondary">link</span>
+                </button>
                 <div className="text-left">
-                  <p
-                    className="text-xs uppercase tracking-widest mb-0.5"
-                    style={{ color: '#00e3fd', fontFamily: 'var(--font-space-grotesk)' }}
-                  >
-                    Input source
-                  </p>
-                  <p
-                    className="font-bold text-base"
-                    style={{ color: '#f9f9fd', fontFamily: 'var(--font-manrope)' }}
-                  >
-                    Paste Product URL
-                  </p>
+                  <p className="font-label text-[10px] text-secondary uppercase tracking-widest">Input source</p>
+                  <p className="font-headline font-bold">Paste Product URL</p>
                 </div>
               </div>
-
-              <div
-                className="w-full px-4 py-3 rounded-lg text-sm"
-                style={{
-                  background: '#23262a',
-                  border: '1px solid rgba(70,72,75,0.30)',
-                  color: '#aaabaf',
-                  fontFamily: 'monospace',
-                }}
-              >
-                https://teaser.ai/new-launch
+              <div className="relative group flex items-center">
+                <input 
+                  className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-4 py-3 font-body text-on-surface-variant outline-none focus:ring-2 focus:ring-primary/50 relative z-10 text-sm" 
+                  type="url" 
+                  placeholder="https://teaser.ai/new-launch"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCreateVideo();
+                  }}
+                />
+                <div className="absolute inset-0 bg-primary/5 rounded-lg pointer-events-none group-hover:opacity-100 opacity-0 transition-opacity"></div>
               </div>
             </div>
-
-            {/* Center arrow */}
-            <div className="lg:flex items-center justify-center hidden shrink-0">
-              <div
-                className="w-12 h-12 rounded-full flex items-center justify-center shadow-lg"
-                style={{
-                  background: 'linear-gradient(135deg, #b6a0ff, #00e3fd)',
-                  boxShadow: '0 8px 24px rgba(182,160,255,0.3)',
-                }}
-              >
-                <svg className="w-5 h-5" style={{ color: '#000' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                </svg>
+            {/* Transition Arrow */}
+            <button title="Start generating" onClick={handleCreateVideo} className="lg:flex items-center justify-center hidden cursor-pointer hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-full ai-energy-gradient flex items-center justify-center shadow-lg">
+                <span className="material-symbols-outlined text-on-primary-fixed">arrow_forward</span>
               </div>
-            </div>
-
-            {/* Output side — video preview */}
-            <div
-              className="relative group overflow-hidden"
-              style={{
-                flex: '1.5',
-                borderRadius: '12px',
-                background: '#0c0e11',
-                minHeight: '200px',
-                aspectRatio: '16/9',
-              }}
-            >
-              {/* Dark overlay gradient */}
-              <div
-                className="absolute inset-0 z-10"
-                style={{
-                  background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)',
-                  borderRadius: '12px',
-                }}
-              />
-              {/* Subtle grid texture */}
-              <div
-                className="absolute inset-0"
-                style={{
-                  backgroundImage: 'linear-gradient(rgba(182,160,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(182,160,255,0.03) 1px, transparent 1px)',
-                  backgroundSize: '32px 32px',
-                }}
-              />
-
-              {/* Play button */}
+            </button>
+            {/* Output Side */}
+            <button onClick={handleCreateVideo} className="flex-[1.5] relative group aspect-video lg:aspect-auto cursor-pointer block w-full text-left p-0 border-none outline-none">
+              <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent z-10 rounded-xl"></div>
+              <img alt="Video transformation preview" className="w-full h-full object-cover rounded-xl grayscale group-hover:grayscale-0 transition-all duration-700" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD6i-jX1F0Hwww3mCpP1lqwrhFOXaZ59wOSbuecT4822D1q_Xn2wFhmviBWnY5X508OY2ZBbOvXOhY6A53Av5ht9yH6j4nmoXoU9ogo87HzpDI6Kqawif3YZzTO-nyglE-KpngFUaIZjGNK5E1Mc3hCqCHsa4apyj8pDp98qmK9GHqS6fv52TGcmVKSxiYsUJUUL-mw1DQXW2asqucH9rzT2MRYOOrx0M_peocBj_rMYFYqCmfQImuo0K8IiwULTxgRnwX4lvdrYsI" />
               <div className="absolute inset-0 flex items-center justify-center z-20">
-                <div
-                  className="w-14 h-14 rounded-full flex items-center justify-center transition-transform duration-300 group-hover:scale-110"
-                  style={{
-                    background: 'rgba(17,20,23,0.7)',
-                    backdropFilter: 'blur(12px)',
-                    border: '1px solid rgba(255,255,255,0.2)',
-                  }}
-                >
-                  <svg className="w-6 h-6 ml-1" style={{ color: '#fff' }} fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
+                <div className="w-16 h-16 rounded-full glass-panel flex items-center justify-center border border-white/20 group-hover:scale-110 transition-transform shadow-[0_0_15px_rgba(255,255,255,0.1)]">
+                  <span className="material-symbols-outlined text-white text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
                 </div>
               </div>
-
-              {/* Bottom badges */}
               <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2">
-                <div
-                  className="px-3 py-1 rounded"
-                  style={{
-                    background: 'rgba(0,227,253,0.20)',
-                    backdropFilter: 'blur(8px)',
-                    border: '1px solid rgba(0,227,253,0.30)',
-                  }}
-                >
-                  <span
-                    className="text-[10px] font-bold"
-                    style={{ color: '#00e3fd', fontFamily: 'var(--font-space-grotesk)', letterSpacing: '0.1em' }}
-                  >
-                    4K READY
-                  </span>
+                <div className="px-3 py-1 rounded bg-secondary/20 backdrop-blur-md border border-secondary/30">
+                  <span className="font-label text-[10px] text-secondary font-bold">4K READY</span>
                 </div>
-                <div
-                  className="px-3 py-1 rounded"
-                  style={{
-                    background: 'rgba(255,255,255,0.10)',
-                    backdropFilter: 'blur(8px)',
-                    border: '1px solid rgba(255,255,255,0.20)',
-                  }}
-                >
-                  <span
-                    className="text-[10px] font-bold"
-                    style={{ color: '#fff', fontFamily: 'var(--font-space-grotesk)', letterSpacing: '0.1em' }}
-                  >
-                    GENERATING... 88%
-                  </span>
+                <div className="px-3 py-1 rounded bg-white/10 backdrop-blur-md border border-white/20">
+                  <span className="font-label text-[10px] text-white">GENERATING... 88%</span>
                 </div>
               </div>
-            </div>
-
+            </button>
           </div>
         </div>
-      </motion.div>
+        {/* Floating Accents */}
+        <div className="absolute -top-12 -right-12 w-48 h-48 bg-tertiary/10 blur-[60px] rounded-full hidden lg:block pointer-events-none"></div>
+        <div className="absolute -bottom-8 -left-8 w-64 h-64 bg-secondary/10 blur-[80px] rounded-full hidden lg:block pointer-events-none"></div>
+      </div>
     </section>
   )
 }

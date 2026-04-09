@@ -1,3 +1,13 @@
+import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/**
+ * Standard utility for merging Tailwind CSS classes with clsx support.
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
 /**
  * Pauses execution for the specified number of milliseconds.
  * @param ms - Duration to sleep in milliseconds
