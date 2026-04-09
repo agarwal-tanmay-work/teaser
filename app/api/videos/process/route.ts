@@ -212,7 +212,9 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     // ── Stage 3: Record (35 → 55%) ────────────────────────────────────────
     try {
       const { recordProduct } = await import('@/workers/browserRecorder')
-      recordingPath = await recordProduct(productUrl, script, jobId, credentials)
+      // Pass `understanding` (not `script`) — demo_flow has reliable click/navigate
+      // actions. VideoScript drives narration/captions in the assembler only.
+      recordingPath = await recordProduct(productUrl, understanding, jobId, credentials)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       throw new Error(

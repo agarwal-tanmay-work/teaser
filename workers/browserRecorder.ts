@@ -3,7 +3,7 @@ import path from 'path'
 import os from 'os'
 import { chromium, type Page, type ElementHandle } from 'playwright'
 import { logger } from '../lib/logger'
-import type { ClickEvent, VideoScript, ScriptSegment } from '../types'
+import type { ClickEvent, ProductUnderstanding, DemoStep } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
 
@@ -124,17 +124,20 @@ const INIT_OVERLAY_SCRIPT = `
 
 /**
  * Fades out and removes the loading overlay once the page is ready.
+ * Uses a short 0.4s fade so the recording shows minimal dark-screen time.
  */
 async function fadeOutOverlay(page: Page): Promise<void> {
   try {
     await page.evaluate(() => {
       const d = document.getElementById('__teaser_loading__') as HTMLElement | null
+      const s = document.getElementById('__teaser_loading_style__') as HTMLStyleElement | null
       if (d) {
+        d.style.transition = 'opacity 0.4s ease'
         d.style.opacity = '0'
-        setTimeout(() => d.remove(), 1300)
+        setTimeout(() => { d.remove(); s?.remove() }, 500)
       }
     })
-    await page.waitForTimeout(1400)
+    await page.waitForTimeout(550)
   } catch {
     // Non-fatal
   }
@@ -345,14 +348,14 @@ async function attemptLogin(
  */
 async function executeStep(
   page: Page,
-  step: ScriptSegment,
+  step: DemoStep,
   stepIndex: number,
   productUrl: string,
   clickEvents: ClickEvent[],
   startTime: number
 ): Promise<void> {
   const elapsed = (Date.now() - startTime) / 1000
-  const actionName = step.action || 'wait'
+  const actionName = step.action
 
   try {
     switch (actionName) {
@@ -370,10 +373,10 @@ async function executeStep(
         const targetUrl = step.navigate_to?.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to || '', productUrl).href
-        await page.goto(targetUrl, { 
-          waitUntil: 'networkidle', 
-          timeout: 20000 
-        })
+        await page.goto(targetUrl, {
+          waitUntil: 'networkidle',
+          timeout: 20000,
+        }).catch(() => {})
         await page.waitForTimeout(2000)
         await injectCustomCursor(page)
         break
@@ -383,21 +386,31 @@ async function executeStep(
         if (!step.element_to_click) break
 
         try {
+          // Escape regex special chars so "Get Started" doesn't break the pattern
+          const escaped = step.element_to_click.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const re = new RegExp(escaped, 'i')
+
+          // Use regex-based matching for robustness — matches partial text case-insensitively
+          // so "Get Started" finds "Get Started Free →" etc.
           const locators = [
-            page.getByText(step.element_to_click, {exact: false}),
-            page.getByRole('button', {name: step.element_to_click}),
-            page.getByRole('link', {name: step.element_to_click}),
-            page.locator(`[aria-label="${step.element_to_click}"]`),
-            page.locator(`text=${step.element_to_click}`)
+            page.getByRole('button',   { name: re }),
+            page.getByRole('link',     { name: re }),
+            page.getByRole('menuitem', { name: re }),
+            page.getByRole('tab',      { name: re }),
+            page.locator('button',          { hasText: re }),
+            page.locator('a',               { hasText: re }),
+            page.locator('[role="button"]',  { hasText: re }),
+            page.locator('nav a',           { hasText: re }),
+            page.locator('li a',            { hasText: re }),
+            page.getByText(step.element_to_click, { exact: false }),
           ]
 
           let clicked = false
           for (const loc of locators) {
             try {
               const firstLocator = loc.first()
-              await firstLocator.waitFor({ state: 'visible', timeout: 3000 })
-              
-              // Embellishment: Capture click position and animate
+              await firstLocator.waitFor({ state: 'visible', timeout: 2000 })
+
               const box = await firstLocator.boundingBox()
               if (box) {
                 const centerX = Math.round(box.x + box.width / 2)
@@ -408,7 +421,7 @@ async function executeStep(
                 await page.waitForTimeout(350)
                 await triggerClickAnimation(page, centerX, centerY)
               }
-              
+
               await firstLocator.click({ timeout: 3000 })
               clicked = true
               logger.info(`browserRecorder: step ${stepIndex} — clicked "${step.element_to_click}"`)
@@ -419,7 +432,7 @@ async function executeStep(
           }
 
           if (!clicked) {
-            logger.warn(`browserRecorder: step ${stepIndex} — failed to click "${step.element_to_click}"`)
+            logger.warn(`browserRecorder: step ${stepIndex} — could not find "${step.element_to_click}" to click`)
           }
 
           await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
@@ -427,7 +440,7 @@ async function executeStep(
           await injectCustomCursor(page)
 
         } catch (err) {
-          logger.warn(`browserRecorder: step ${stepIndex} — overarching click error for "${step.element_to_click}"`, { err })
+          logger.warn(`browserRecorder: step ${stepIndex} — click error for "${step.element_to_click}"`, { err })
         }
         break
       }
@@ -485,19 +498,22 @@ async function executeStep(
 /**
  * Records a real product demo at 1080p HD.
  *
- * Key improvements over naive recording:
- * - Injects a dark overlay via MutationObserver init script so the white browser
- *   loading screen is NEVER recorded — overlay fades out when the page is ready.
- * - Animated custom cursor slides to each target and pulses on click.
- * - findElement uses Playwright's locator API with partial regex matching for
- *   robust CTA button discovery regardless of CSS class names.
- * - Falls back to page.mouse.click at coordinates if el.click() fails.
+ * Uses `understanding.demo_flow` for browser interactions — this has reliable
+ * action types (click/navigate/scroll) with visible button text generated by
+ * `understandProduct()`. The `VideoScript` is used separately for narration
+ * timing and captions in the assembler; it is NOT used to drive recording.
+ *
+ * Key behaviours:
+ * - Dark overlay covers the initial page load — fades out in 0.4s once ready
+ * - Animated custom cursor slides to each target and pulses on click
+ * - Regex-based locators (partial, case-insensitive) find real-world CTAs
+ *   regardless of surrounding text, icons, or CSS class names
  *
  * @returns Path to the recorded .webm video file
  */
 export async function recordProduct(
   productUrl: string,
-  script: VideoScript,
+  understanding: ProductUnderstanding,
   jobId: string,
   credentials?: { username: string; password: string }
 ): Promise<string> {
@@ -555,6 +571,8 @@ export async function recordProduct(
     // ─── Navigate ───
     logger.info(`browserRecorder: navigating to ${productUrl}`)
     const response = await page.goto(productUrl, {
+      // 'networkidle' already waits for full network quiescence — no need for
+      // additional waitForLoadState calls after this.
       waitUntil: 'networkidle',
       timeout: 60000,
     })
@@ -562,12 +580,12 @@ export async function recordProduct(
       throw new Error(`Could not access the product URL. Status: ${response?.status() ?? 'unknown'}`)
     }
 
-    // Wait for full page load + JS rendering behind the overlay
-    await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
-    await page.waitForTimeout(3000)
+    // Brief settle time for final JS renders; then immediately fade the overlay
+    // so the recording doesn't spend long on a dark screen.
+    await page.waitForTimeout(800)
 
-    // Fade out the dark loading overlay — site is now fully rendered beneath it
+    // Fade out the dark loading overlay — site is now fully rendered beneath it.
+    // Fade takes 0.4s; we wait 0.55s total before continuing.
     await fadeOutOverlay(page)
 
     // Inject cursor and popup-hiding CSS
@@ -576,23 +594,27 @@ export async function recordProduct(
     // Optional login
     if (credentials) {
       await attemptLogin(page, credentials)
-      await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
-      await page.waitForTimeout(3000)
+      await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {})
+      await page.waitForTimeout(800)
       await fadeOutOverlay(page)
       await injectCustomCursor(page)
     }
 
-    // Briefly pause before interactions
-    await page.waitForTimeout(1200)
+    // Small pause before interactions so the site is visually stable
+    await page.waitForTimeout(800)
 
     const recordingStartTime = Date.now()
 
     // ─── Execute Demo Flow ───
-    logger.info(`browserRecorder: executing ${script.segments.length} demo steps`)
+    // Use understanding.demo_flow for recording — Gemini generates explicit
+    // action types (click/navigate/scroll) with visible button text here.
+    // VideoScript segments are used for narration/captions only (in assembler).
+    const demoSteps = understanding.demo_flow
+    logger.info(`browserRecorder: executing ${demoSteps.length} demo steps from understanding.demo_flow`)
     let stepIndex = 1
-    for (const segment of script.segments) {
-      logger.info(`browserRecorder: step ${stepIndex} — ${segment.action}: ${segment.what_to_show}`)
-      await executeStep(page, segment, stepIndex, productUrl, clickEvents, recordingStartTime)
+    for (const step of demoSteps) {
+      logger.info(`browserRecorder: step ${stepIndex}/${demoSteps.length} — ${step.action}: ${step.description}`)
+      await executeStep(page, step, stepIndex, productUrl, clickEvents, recordingStartTime)
       await page.waitForTimeout(1200)
       stepIndex++
     }

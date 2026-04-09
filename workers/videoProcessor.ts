@@ -140,7 +140,7 @@ const worker = new Worker<VideoJobQueueData>(
       // ─── STAGE 3: Browser Recording (35 → 55%) ────────────────────────────
       recordingPath = await recordProduct(
         product_url,
-        script,
+        understanding,
         jobId,
         credentials
       )

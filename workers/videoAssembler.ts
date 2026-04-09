@@ -439,11 +439,13 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       ffmpeg(recordingPath)
         .noAudio()
         .videoCodec('libx264')
-        .videoFilter(['eq=contrast=1.1:brightness=-0.05:saturation=1.2', 'unsharp=5:5:0.8:3:3:0.4'])
+        // Boost saturation and contrast; sharpen slightly.
+        // NOTE: Do NOT add -colorspace/-color_primaries/-color_trc tags here.
+        // Playwright records in sRGB full-range; tagging the output as BT.709
+        // causes players to apply the wrong colour matrix, producing washed-out output.
+        .videoFilter(['eq=contrast=1.15:brightness=-0.02:saturation=1.35', 'unsharp=5:5:0.8:3:3:0.4'])
         .outputOptions([
           '-crf 18', '-preset slow', '-profile:v high', '-r 30', '-pix_fmt yuv420p',
-          // Preserve BT.709 colour space — prevents washed-out / desaturated output
-          '-colorspace bt709', '-color_primaries bt709', '-color_trc bt709',
         ])
         .output(convertedPath)
     )
