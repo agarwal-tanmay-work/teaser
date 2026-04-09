@@ -1,10 +1,11 @@
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import ffmpeg from 'fluent-ffmpeg'
 import { logger } from '../lib/logger'
 import type { VideoScript, ProductUnderstanding, VideoLength } from '../types'
 
-const RENDERED_DIR = '/tmp/rendered'
+const RENDERED_DIR = path.join(os.tmpdir(), 'teaser-rendered')
 
 /** Options for assembling a complete video from its component parts. */
 export interface AssembleVideoOptions {
@@ -63,7 +64,7 @@ function escapeFfmpegText(text: string): string {
 export async function assembleVideo(options: AssembleVideoOptions): Promise<string> {
   const { recordingPath, voiceoverPath, script, understanding, jobId } = options
 
-  const workDir = `/tmp/assembly/${jobId}`
+  const workDir = path.join(os.tmpdir(), 'teaser-assembly', jobId)
   fs.mkdirSync(workDir, { recursive: true })
   fs.mkdirSync(RENDERED_DIR, { recursive: true })
 

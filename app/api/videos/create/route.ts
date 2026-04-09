@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { cookies } from 'next/headers'
 import { createServerClient as createSSRClient } from '@supabase/ssr'
-import { addVideoJob } from '@/lib/queue'
 import { logger } from '@/lib/logger'
 import type { ApiResponse, VideoCreateResponse } from '@/types'
 
@@ -10,19 +9,15 @@ const CreateVideoSchema = z.object({
   product_url: z
     .string()
     .url('Please enter a valid URL.')
-    .refine((url) => url.startsWith('https://'), 'URL must start with https://'),
+    .refine((url) => url.startsWith('https://') || url.startsWith('http://'), 'URL must start with http:// or https://'),
   description: z.string().max(300).optional(),
   video_length: z.union([z.literal(30), z.literal(60), z.literal(90)]),
   tone: z.enum(['professional', 'conversational', 'energetic']),
   features: z.string().max(500).optional(),
-  credentials: z
-    .object({ username: z.string(), password: z.string() })
-    .optional(),
 })
 
 /**
  * Creates an authenticated Supabase client using request cookies.
- * Used inside API route handlers that need session access.
  */
 async function getAuthClient() {
   const cookieStore = await cookies()
@@ -31,12 +26,8 @@ async function getAuthClient() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll() {
-          // Read-only in route handlers
-        },
+        getAll() { return cookieStore.getAll() },
+        setAll() { /* Read-only in route handlers */ },
       },
     }
   )
@@ -44,7 +35,8 @@ async function getAuthClient() {
 
 /**
  * POST /api/videos/create
- * Creates a new video generation job and enqueues it for processing.
+ * Inserts a video job into Supabase and returns the job ID immediately.
+ * Processing is triggered client-side via /api/videos/process/[jobId].
  * Requires an authenticated session.
  */
 export async function POST(
@@ -52,9 +44,7 @@ export async function POST(
 ): Promise<NextResponse<ApiResponse<VideoCreateResponse>>> {
   try {
     const supabase = await getAuthClient()
-    const {
-      data: { session },
-    } = await supabase.auth.getSession()
+    const { data: { session } } = await supabase.auth.getSession()
 
     if (!session) {
       return NextResponse.json(
@@ -73,27 +63,9 @@ export async function POST(
       )
     }
 
-    const { product_url, description, video_length, tone, features, credentials } =
-      parsed.data
+    const { product_url, description, video_length, tone, features } = parsed.data
 
-    // Check URL is publicly reachable
-    try {
-      await fetch(product_url, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000),
-      })
-    } catch {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            'This URL is not publicly accessible. Please check the link and try again.',
-        },
-        { status: 400 }
-      )
-    }
-
-    // Insert the job into Supabase
+    // Insert the job — status starts as 'pending'
     const { data: inserted, error: insertError } = await supabase
       .from('video_jobs')
       .insert({
@@ -105,6 +77,7 @@ export async function POST(
         features_to_highlight: features,
         status: 'pending',
         progress: 0,
+        progress_message: 'Queued — starting soon...',
       })
       .select('id')
       .single()
@@ -119,17 +92,7 @@ export async function POST(
 
     const jobId = inserted.id as string
 
-    // Enqueue the job
-    await addVideoJob({
-      jobId,
-      product_url,
-      description,
-      video_length,
-      tone,
-      features,
-      credentials,
-    })
-
+    // Return immediately — client will trigger /api/videos/process/[jobId]
     return NextResponse.json({ success: true, data: { job_id: jobId } }, { status: 201 })
   } catch (error) {
     logger.error('videos/create: unexpected error', { error })

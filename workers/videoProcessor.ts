@@ -3,6 +3,8 @@ config({ path: '.env.local' })
 
 import { Worker, type Job } from 'bullmq'
 import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import { createServiceClient } from '../lib/supabase'
 import { generateVoiceover } from '../lib/elevenlabs'
 import { logger } from '../lib/logger'
@@ -103,7 +105,7 @@ const worker = new Worker<VideoJobQueueData>(
     const supabase = createServiceClient()
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
-    const voiceoverPath = `/tmp/voiceovers/${jobId}.mp3`
+    const voiceoverPath = path.join(os.tmpdir(), 'teaser-voiceovers', `${jobId}.mp3`)
     let recordingPath = ''
 
     try {
@@ -148,7 +150,7 @@ const worker = new Worker<VideoJobQueueData>(
       await updateProgress(jobId, 55, 'Script ready. Generating your voiceover...')
 
       // ─── STAGE 4: Voiceover Generation (55 → 70%) ─────────────────────────
-      fs.mkdirSync('/tmp/voiceovers', { recursive: true })
+      fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
       const fullScript = script.segments.map((s) => s.narration).join(' ')
       await generateVoiceover(fullScript, tone, voiceoverPath)
 

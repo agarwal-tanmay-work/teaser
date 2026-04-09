@@ -41,7 +41,7 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
 
   const urlValid = isValidUrl(url)
 
-  /** Submits the form to create a video job. */
+  /** Submits the form: creates the job record, fires the pipeline, then shows progress. */
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!urlValid) return
@@ -49,21 +49,19 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
     setLoading(true)
 
     try {
-      const body: Record<string, unknown> = {
+      // Step 1: create the job record in Supabase (returns immediately)
+      const createBody: Record<string, unknown> = {
         product_url: url,
         video_length: videoLength,
         tone,
       }
-      if (description) body.description = description
-      if (features) body.features = features
-      if (credUsername && credPassword) {
-        body.credentials = { username: credUsername, password: credPassword }
-      }
+      if (description) createBody.description = description
+      if (features) createBody.features = features
 
       const res = await fetch('/api/videos/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(createBody),
       })
 
       if (!res.ok && res.status >= 500) {
@@ -77,7 +75,23 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
         return
       }
 
-      onJobCreated(data.data.job_id)
+      const jobId = data.data.job_id
+
+      // Step 2: fire the pipeline (non-awaited — runs in background while we show progress)
+      const processBody: Record<string, unknown> = {}
+      if (credUsername && credPassword) {
+        processBody.credentials = { username: credUsername, password: credPassword }
+      }
+      fetch(`/api/videos/process?jobId=${jobId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(processBody),
+      }).catch(() => {
+        // Pipeline errors surface via Supabase status polling — no action needed here
+      })
+
+      // Step 3: show the progress tracker immediately
+      onJobCreated(jobId)
     } catch {
       setError('Something went wrong. Please try again.')
     } finally {

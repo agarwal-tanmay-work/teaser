@@ -1,10 +1,11 @@
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import { chromium, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import type { DemoStep } from '../types'
 
-const RECORDINGS_DIR = '/tmp/recordings'
+const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
 
 /**
  * Attempts to log in to a product using provided credentials.
