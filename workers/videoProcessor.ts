@@ -24,8 +24,11 @@ function buildRedisConnection(): { host: string; port: number; password: string;
   if (!restUrl || !token) {
     logger.warn('videoProcessor: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set — worker will fail to connect')
   }
-  const host = restUrl ? new URL(restUrl).hostname : '127.0.0.1'
-  return { host, port: 6379, password: token, tls: {} }
+  // Parse port from URL (Upstash TLS uses 6380, not 6379)
+  const parsed = restUrl ? new URL(restUrl) : null
+  const host = parsed?.hostname ?? '127.0.0.1'
+  const port = parsed?.port ? parseInt(parsed.port, 10) : 6380
+  return { host, port, password: token, tls: {} }
 }
 
 /** Shape of the data stored on each BullMQ job. */
