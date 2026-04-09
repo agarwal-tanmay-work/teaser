@@ -122,8 +122,24 @@ STEP GUIDELINES:
 - Use "scroll_down" to reveal content below the fold
 - Use "scroll_up" to return to top
 - Use "wait" after complex interactions to let animations/content load
-- For element_to_click, prefer descriptive text like "Get Started" or "Pricing" over CSS selectors
 - Make the flow feel like a REAL USER exploring the product naturally
+
+ELEMENT TARGETING RULES (critical for automation reliability — follow exactly):
+- element_to_click MUST be the VISIBLE TEXT shown on the button or link (e.g., "Get Started", "Sign Up Free", "Try for free", "Pricing", "Features")
+- Do NOT use CSS class names (e.g., ".btn-cta", "#hero-button", ".nav-link") — these WILL fail
+- Do NOT use HTML attributes like data-id or aria-hidden
+- Keep element_to_click SHORT: 1–5 words that exactly match what the user sees on screen
+- For navigation menu items: use the exact nav label ("Features", "Pricing", "About", "Docs", "Blog")
+- For CTA buttons: use the button's visible text exactly as it appears ("Start free trial", "Get started free", "Book a demo")
+- For form inputs: use the placeholder text ("Search...", "Enter your email", "Email address")
+- If a button says "→" or uses an icon only, use its aria-label if visible, otherwise skip it
+
+TIMING RULES:
+- Always add a "wait" step immediately after every major CTA click (page loads, modals, animations need time)
+- Always add a "wait" step right after each "navigate" step before interacting with the new page
+- Aim for at least 15 steps total — more meaningful interactions = better product video
+- Show the ACTUAL PRODUCT functionality, not just the marketing landing page
+- If the product has a dashboard, interactive demo, pricing table, or feature showcase — go there and interact with it
 
 Product URL: ${productUrl}
 User description: ${description ?? 'Not provided'}

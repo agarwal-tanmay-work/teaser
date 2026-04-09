@@ -13,8 +13,12 @@ const OUT_H = 1080
 /** Browser window sits inside the background with padding */
 const BROWSER_W = 1680
 const BROWSER_H = 945
-const PAD_X = Math.round((OUT_W - BROWSER_W) / 2)
-const PAD_Y = Math.round((OUT_H - BROWSER_H) / 2)
+const PAD_X = Math.round((OUT_W - BROWSER_W) / 2)   // 120
+const PAD_Y = Math.round((OUT_H - BROWSER_H) / 2)   // 68
+
+/** Source viewport dimensions (must match browserRecorder VIDEO_WIDTH/HEIGHT) */
+const VIDEO_W_SOURCE = 1920
+const VIDEO_H_SOURCE = 1080
 
 const RENDERED_DIR = path.join(os.tmpdir(), 'teaser-rendered')
 
@@ -121,7 +125,7 @@ function runRawFfmpeg(args: string[]): Promise<void> {
 /**
  * Wraps text into multiple lines to fit on screen.
  */
-function wrapText(text: string, maxChars: number = 65): string[] {
+function wrapText(text: string, maxChars: number = 60): string[] {
   const words = text.split(' ')
   const lines: string[] = []
   let currentLine = ''
@@ -139,7 +143,6 @@ function wrapText(text: string, maxChars: number = 65): string[] {
 
 /**
  * Escapes special characters for FFmpeg drawtext filters used in filter script files.
- * In filter scripts, colons and backslashes need single-level escaping.
  */
 function escapeForFilterScript(text: string): string {
   return text
@@ -154,7 +157,6 @@ function escapeForFilterScript(text: string): string {
 
 /**
  * Escapes special characters for FFmpeg drawtext filters passed via -vf argument.
- * Needs double escaping since the shell processes one level.
  */
 function escapeForVfArg(text: string): string {
   return text
@@ -194,20 +196,19 @@ async function createIntro(
   const escapedName = escapeForVfArg(productName)
   const escapedTagline = escapeForVfArg(tagline)
 
-  // Gradient background with centered product name and tagline
   const vf = [
-    // Indigo-to-purple gradient
-    `geq=r='clip(40+X*55/${OUT_W}\\,0\\,255)':g='clip(30+X*30/${OUT_W}\\,0\\,255)':b='clip(140+X*100/${OUT_W}\\,0\\,255)'`,
+    // Rich indigo-to-purple gradient (richer than simple linear)
+    `geq=r='clip(38+X*60/${OUT_W}\\,0\\,255)':g='clip(28+X*28/${OUT_W}\\,0\\,255)':b='clip(135+X*105/${OUT_W}\\,0\\,255)'`,
     // Product name — large, centered, fade-in
     `drawtext=text='${escapedName}'` +
-    `:fontsize=72:fontcolor=white` +
-    `:x=(w-text_w)/2:y=(h-text_h)/2-40` +
+    `:fontsize=74:fontcolor=white` +
+    `:x=(w-text_w)/2:y=(h-text_h)/2-44` +
     `:alpha='if(lt(t\\,0.5)\\,t*2\\,1)'`,
     // Tagline — smaller, below the name, staggered fade-in
     `drawtext=text='${escapedTagline}'` +
-    `:fontsize=32:fontcolor=0xcccccc` +
-    `:x=(w-text_w)/2:y=(h/2)+40` +
-    `:alpha='if(lt(t\\,1)\\,0\\,if(lt(t\\,1.5)\\,(t-1)*2\\,1))'`,
+    `:fontsize=32:fontcolor=0xdddddd` +
+    `:x=(w-text_w)/2:y=(h/2)+44` +
+    `:alpha='if(lt(t\\,1)\\,0\\,if(lt(t\\,1.6)\\,(t-1)*1.67\\,1))'`,
   ].join(',')
 
   await runRawFfmpeg([
@@ -215,32 +216,33 @@ async function createIntro(
     '-vf', vf,
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
-    '-preset', 'medium',
+    '-preset', 'veryfast',
+    '-crf', '18',
     '-y',
     outputPath,
   ])
 }
 
 /**
- * Creates a premium branded outro clip with dark gradient and subtle glow.
+ * Creates a premium branded outro clip with dark gradient and CTA.
  */
 async function createOutro(
   outputPath: string,
   duration: number = 3
 ): Promise<void> {
   const vf = [
-    // Dark gradient background
-    `geq=r='clip(8+X*5/${OUT_W}\\,0\\,255)':g='clip(6+X*3/${OUT_W}\\,0\\,255)':b='clip(16+X*10/${OUT_W}\\,0\\,255)'`,
+    // Dark gradient background — deep navy
+    `geq=r='clip(8+X*6/${OUT_W}\\,0\\,255)':g='clip(6+X*4/${OUT_W}\\,0\\,255)':b='clip(18+X*12/${OUT_W}\\,0\\,255)'`,
     // Main CTA text — fade-in
     `drawtext=text='useteaser.com'` +
-    `:fontsize=56:fontcolor=0xaaaacc` +
+    `:fontsize=58:fontcolor=0xaaaacc` +
     `:x=(w-text_w)/2:y=(h-text_h)/2` +
     `:alpha='if(lt(t\\,0.5)\\,t*2\\,1)'`,
     // Subtitle
     `drawtext=text='Create your product video in seconds'` +
-    `:fontsize=24:fontcolor=0x666688` +
-    `:x=(w-text_w)/2:y=(h/2)+50` +
-    `:alpha='if(lt(t\\,1)\\,0\\,if(lt(t\\,1.5)\\,(t-1)*2\\,1))'`,
+    `:fontsize=26:fontcolor=0x666688` +
+    `:x=(w-text_w)/2:y=(h/2)+52` +
+    `:alpha='if(lt(t\\,1)\\,0\\,if(lt(t\\,1.6)\\,(t-1)*1.67\\,1))'`,
     // Fade out at the end
     `fade=t=out:st=${duration - 0.8}:d=0.8`,
   ].join(',')
@@ -250,19 +252,20 @@ async function createOutro(
     '-vf', vf,
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
-    '-preset', 'medium',
+    '-preset', 'veryfast',
+    '-crf', '18',
     '-y',
     outputPath,
   ])
 }
 
 /**
- * Creates the framed composition: browser recording centered on a dark gradient
- * background with a soft drop shadow.
+ * Creates the framed composition: browser recording centered on a premium dark gradient
+ * background, with a soft drop shadow beneath the browser window.
  *
- * Uses a two-pass approach to avoid complex filter graph issues:
- * 1. Generate a static gradient background frame (PNG)
- * 2. Overlay the scaled browser recording onto it
+ * Pipeline:
+ * 1. Generate a single-frame gradient background PNG
+ * 2. Overlay the browser recording with a blurred shadow copy beneath it
  */
 async function createFramedRecording(
   inputPath: string,
@@ -271,28 +274,32 @@ async function createFramedRecording(
 ): Promise<void> {
   const bgPath = path.join(workDir, 'gradient_bg.png')
 
-  // Step A: generate a single-frame dark gradient background
+  // Step A: generate gradient background frame (deep navy-to-indigo)
   await runRawFfmpeg([
     '-f', 'lavfi',
-    '-i', `color=c=0x0c0a1a:s=${OUT_W}x${OUT_H}:d=1:r=1`,
-    '-vf', `geq=r='clip(12+X/20+Y/25\\,0\\,255)':g='clip(8+X/30\\,0\\,255)':b='clip(22+X/15+Y/20\\,0\\,255)'`,
+    '-i', `color=c=0x080614:s=${OUT_W}x${OUT_H}:d=1:r=1`,
+    '-vf', `geq=r='clip(8+X*22/${OUT_W}+Y*12/${OUT_H}\\,0\\,255)':g='clip(6+X*8/${OUT_W}\\,0\\,255)':b='clip(20+X*55/${OUT_W}+Y*32/${OUT_H}\\,0\\,255)'`,
     '-frames:v', '1',
     '-y',
     bgPath,
   ])
 
-  // Step B: overlay the browser recording onto the gradient background
-  // The filter graph:
-  //   [1:v] = gradient bg image (looped to match video duration)
-  //   [0:v] = browser recording
-  //   Scale browser, create shadow, compose
+  // Step B: compose browser on gradient with drop shadow
+  // Shadow = blurred copy of browser window, overlaid at a slight offset behind
+  const shadowOffsetX = PAD_X + 20   // 140
+  const shadowOffsetY = PAD_Y + 24   // 92
+
   const filterGraph = [
-    // Loop the background image to match the video duration
+    // Loop the gradient background PNG to match video duration
     `[1:v]loop=loop=-1:size=1:start=0,setpts=N/30/TB,scale=${OUT_W}:${OUT_H}[bg]`,
-    // Scale the browser recording
+    // Scale browser recording to its framed size
     `[0:v]scale=${BROWSER_W}:${BROWSER_H}:flags=lanczos[browser]`,
-    // Overlay browser on background with padding
-    `[bg][browser]overlay=${PAD_X}:${PAD_Y}:shortest=1[framed]`,
+    // Create shadow: blur the browser and reduce opacity
+    `[browser]split[b1][b2]`,
+    `[b2]boxblur=luma_radius=32:luma_power=3,colorchannelmixer=aa=0.52[shadow]`,
+    // Compose: gradient → shadow (offset) → browser
+    `[bg][shadow]overlay=${shadowOffsetX}:${shadowOffsetY}[bg_shadow]`,
+    `[bg_shadow][b1]overlay=${PAD_X}:${PAD_Y}:shortest=1[framed]`,
   ].join(';')
 
   const filterPath = path.join(workDir, 'framing.txt')
@@ -304,8 +311,8 @@ async function createFramedRecording(
     '-filter_complex_script', filterPath,
     '-map', '[framed]',
     '-c:v', 'libx264',
-    '-crf', '18',
-    '-preset', 'medium',
+    '-crf', '16',
+    '-preset', 'veryfast',
     '-r', '30',
     '-pix_fmt', 'yuv420p',
     '-y',
@@ -314,16 +321,94 @@ async function createFramedRecording(
 }
 
 /**
+ * Builds a chained FFmpeg filter graph that applies smooth zoom-in effects
+ * for every tracked click event. Zooms are deduplicated (min 3s spacing) and
+ * capped at 6 total to keep the filter graph manageable.
+ *
+ * Each zoom: crop to 1.3× zoom area centered on click, scale back to full
+ * resolution, overlay on the main video during the zoom window.
+ *
+ * @returns FFmpeg filter_complex lines (without trailing newline), or empty string if no zooms
+ */
+function buildZoomFilterChain(
+  clickEvents: ClickEvent[],
+  introOffset: number,
+  inputLabel: string,
+  outputLabel: string
+): string {
+  // Only zoom on actual clicks (not hovers or type events)
+  const clickOnly = clickEvents.filter((e) => e.action === 'click')
+
+  // Deduplicate: skip clicks within 3s of the previous zoom's end
+  const validClicks: ClickEvent[] = []
+  let lastZoomEnd = -999
+  for (const ev of clickOnly) {
+    const t = ev.timestamp + introOffset
+    if (t > lastZoomEnd + 0.5) {
+      validClicks.push(ev)
+      lastZoomEnd = t + 2.8
+    }
+    if (validClicks.length >= 6) break
+  }
+
+  if (validClicks.length === 0) return ''
+
+  const zoomFactor = 1.3
+  const cropW = Math.round(OUT_W / zoomFactor)   // ≈1477
+  const cropH = Math.round(OUT_H / zoomFactor)   // ≈831
+
+  const lines: string[] = []
+  let currentInput = inputLabel
+
+  for (let i = 0; i < validClicks.length; i++) {
+    const ev = validClicks[i]
+    const t = ev.timestamp + introOffset
+    const zPeak = (t + 0.4).toFixed(2)
+    const zEnd  = (t + 2.8).toFixed(2)
+
+    // Map click coordinates from browser viewport → composited 1920×1080 frame
+    const normX = ev.x / VIDEO_W_SOURCE
+    const normY = ev.y / VIDEO_H_SOURCE
+    const tgtX  = Math.round(PAD_X + normX * BROWSER_W)
+    const tgtY  = Math.round(PAD_Y + normY * BROWSER_H)
+
+    // Center crop on click, clamped to frame bounds
+    const cropX = Math.max(0, Math.min(Math.round(tgtX - cropW / 2), OUT_W - cropW))
+    const cropY = Math.max(0, Math.min(Math.round(tgtY - cropH / 2), OUT_H - cropH))
+
+    const mainLabel   = `[zm${i}_main]`
+    const cropLabel   = `[zm${i}_crop]`
+    const zoomedLabel = `[zm${i}_zoomed]`
+    const isLast      = i === validClicks.length - 1
+    const outLabel    = isLast ? outputLabel : `[zm${i}_out]`
+
+    lines.push(`${currentInput}split${mainLabel}${cropLabel}`)
+    lines.push(
+      `${cropLabel}crop=${cropW}:${cropH}:${cropX}:${cropY},` +
+      `scale=${OUT_W}:${OUT_H}:flags=lanczos${zoomedLabel}`
+    )
+    lines.push(
+      `${mainLabel}${zoomedLabel}overlay=0:0:enable='between(t,${zPeak},${zEnd})'${outLabel}`
+    )
+
+    currentInput = outLabel
+  }
+
+  return lines.join(';\n')
+}
+
+/**
  * Assembles the final launch video with premium post-processing.
  *
  * Pipeline:
  * 1. Convert .webm → .mp4 (strip audio, normalize)
- * 2. Create gradient background + browser framing with shadow
- * 3. Render premium intro/outro clips with gradient + text
+ * 2. Frame recording inside premium gradient background with drop shadow
+ * 3. Render branded intro/outro clips
  * 4. Concatenate intro + framed recording + outro
- * 5. Apply auto-zoom on click coordinates (first click only for reliability)
+ * 5. Apply auto-zoom on ALL click coordinates (up to 6, deduplicated)
  * 6. Overlay timed captions with pill-style semi-transparent background
  * 7. Mix voiceover + ambient music
+ * 8. Final render at CRF 16 / slow preset for maximum quality
  */
 export async function assembleVideo(options: AssembleVideoOptions): Promise<string> {
   const { recordingPath, voiceoverPath, script, understanding, jobId } = options
@@ -332,16 +417,15 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
   fs.mkdirSync(workDir, { recursive: true })
   fs.mkdirSync(RENDERED_DIR, { recursive: true })
 
-  const convertedPath = path.join(workDir, 'recording.mp4')
-  const framedPath = path.join(workDir, 'framed.mp4')
-  const introPath = path.join(workDir, 'intro.mp4')
-  const outroPath = path.join(workDir, 'outro.mp4')
-  const concatListPath = path.join(workDir, 'concat.txt')
-  const concatPath = path.join(workDir, 'concat.mp4')
+  const convertedPath    = path.join(workDir, 'recording.mp4')
+  const framedPath       = path.join(workDir, 'framed.mp4')
+  const introPath        = path.join(workDir, 'intro.mp4')
+  const outroPath        = path.join(workDir, 'outro.mp4')
+  const concatListPath   = path.join(workDir, 'concat.txt')
+  const concatPath       = path.join(workDir, 'concat.mp4')
   const filterScriptPath = path.join(workDir, 'filter.txt')
-  const finalPath = path.join(RENDERED_DIR, `${jobId}.mp4`)
+  const finalPath        = path.join(RENDERED_DIR, `${jobId}.mp4`)
 
-  // Load click events for zoom effects
   const clickEvents = loadClickEvents(recordingPath)
   logger.info(`assembleVideo [${jobId}]: loaded ${clickEvents.length} click events`)
 
@@ -354,12 +438,12 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       ffmpeg(recordingPath)
         .noAudio()
         .videoCodec('libx264')
-        .outputOptions(['-crf 18', '-preset medium', '-r 30', '-pix_fmt yuv420p'])
+        .outputOptions(['-crf 16', '-preset veryfast', '-r 30', '-pix_fmt yuv420p'])
         .output(convertedPath)
     )
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 2: Frame recording inside premium gradient background
+    // Step 2: Frame recording inside premium gradient background with shadow
     // ═══════════════════════════════════════════════════════════════════════════
     logger.info(`assembleVideo [${jobId}]: creating framed composition`)
     await createFramedRecording(convertedPath, framedPath, workDir)
@@ -390,65 +474,40 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
         .inputOptions(['-f concat', '-safe 0'])
         .noAudio()
         .videoCodec('libx264')
-        .outputOptions(['-pix_fmt yuv420p', '-preset medium', '-crf 18'])
+        .outputOptions(['-pix_fmt yuv420p', '-preset veryfast', '-crf 16'])
         .output(concatPath)
     )
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 5: Build final filter graph (zoom + captions + audio)
+    // Step 5: Build final filter graph (multi-click zoom + captions + audio)
     // ═══════════════════════════════════════════════════════════════════════════
     logger.info(`assembleVideo [${jobId}]: building final filter graph`)
 
     const introOffset = 3 // Intro duration in seconds
 
-    // ── Auto-zoom on first click ──
-    // We apply zoom to ONE click for reliability (complex crop chains break easily)
-    let zoomFilter = ''
-    if (clickEvents.length > 0) {
-      const ev = clickEvents[0]
-      const t = ev.timestamp + introOffset
-      const zStart = t.toFixed(2)
-      const zPeak = (t + 0.5).toFixed(2)
-      const zEnd = (t + 2.0).toFixed(2)
-
-      // Map click pos from browser viewport → composited frame
-      const normX = ev.x / VIDEO_W_SOURCE
-      const normY = ev.y / VIDEO_H_SOURCE
-      const tgtX = Math.round(PAD_X + normX * BROWSER_W)
-      const tgtY = Math.round(PAD_Y + normY * BROWSER_H)
-
-      // When zoomed to 1.2x, the visible area shrinks.
-      // We crop to (W/1.2 × H/1.2) centered on the click, then scale back up.
-      const cropW = Math.round(OUT_W / 1.2)
-      const cropH = Math.round(OUT_H / 1.2)
-      const cropX = Math.round(Math.max(0, Math.min(tgtX - cropW / 2, OUT_W - cropW)))
-      const cropY = Math.round(Math.max(0, Math.min(tgtY - cropH / 2, OUT_H - cropH)))
-
-      // Smooth zoom: full frame → cropped → full frame
-      // Using enable-based approach: when NOT in zoom window, pass through;
-      // when in zoom window, crop and scale.
-      zoomFilter =
-        `split[z_main][z_crop];` +
-        `[z_crop]crop=${cropW}:${cropH}:${cropX}:${cropY},scale=${OUT_W}:${OUT_H}:flags=lanczos[z_zoomed];` +
-        `[z_main][z_zoomed]overlay=0:0:enable='between(t,${zPeak},${zEnd})'[z_out]`
-    }
+    // ── Multi-click zoom chain ──
+    // buildZoomFilterChain returns lines already containing [0:v] as the first input,
+    // so we must NOT prepend [0:v] again when building videoFilterLines.
+    const zoomChainOutput = '[zoom_out]'
+    const zoomChain = buildZoomFilterChain(clickEvents, introOffset, '[0:v]', zoomChainOutput)
+    const hasZoom = zoomChain.length > 0
 
     // ── Caption drawtext filters ──
     const drawtextFilters = script.segments
       .flatMap((seg) => {
         const wrappedLines = wrapText(seg.narration)
         const start = (seg.start_time + introOffset).toFixed(2)
-        const end = (seg.end_time + introOffset).toFixed(2)
+        const end   = (seg.end_time + introOffset).toFixed(2)
 
         return wrappedLines.map((line, i) => {
-          const text = escapeForFilterScript(line)
-          const yOffset = 50 + (wrappedLines.length - 1 - i) * 38
+          const text    = escapeForFilterScript(line)
+          const yOffset = 54 + (wrappedLines.length - 1 - i) * 40
           return (
             `drawtext=text='${text}'` +
             `:enable='between(t,${start},${end})'` +
-            `:fontsize=28:fontcolor=white` +
+            `:fontsize=30:fontcolor=white` +
             `:x=(w-text_w)/2:y=h-th-${yOffset}` +
-            `:box=1:boxcolor=black@0.65:boxborderw=12`
+            `:box=1:boxcolor=black@0.72:boxborderw=14`
           )
         })
       })
@@ -457,30 +516,29 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     // ── Compose the full video filter chain ──
     let videoFilterLines = ''
 
-    if (zoomFilter && drawtextFilters.length > 0) {
-      // Zoom + captions
-      videoFilterLines = `[0:v]${zoomFilter};\n`
-      let currentInput = '[z_out]'
+    if (hasZoom && drawtextFilters.length > 0) {
+      // Zoom chain already embeds [0:v] as its first input label
+      videoFilterLines = zoomChain + ';\n'
+      let currentInput = zoomChainOutput
       for (let i = 0; i < drawtextFilters.length; i++) {
-        const isLast = i === drawtextFilters.length - 1
+        const isLast   = i === drawtextFilters.length - 1
         const outLabel = isLast ? '[vout]' : `[v${i + 1}]`
         videoFilterLines += `${currentInput}${drawtextFilters[i]}${outLabel};\n`
         currentInput = outLabel
       }
-    } else if (zoomFilter) {
-      // Zoom only, no captions
-      videoFilterLines = `[0:v]${zoomFilter.replace('[z_out]', '[vout]')};\n`
+    } else if (hasZoom) {
+      // Zoom only — output directly to [vout]
+      const chain = buildZoomFilterChain(clickEvents, introOffset, '[0:v]', '[vout]')
+      videoFilterLines = chain + ';\n'
     } else if (drawtextFilters.length > 0) {
-      // Captions only, no zoom
       let currentInput = '[0:v]'
       for (let i = 0; i < drawtextFilters.length; i++) {
-        const isLast = i === drawtextFilters.length - 1
+        const isLast   = i === drawtextFilters.length - 1
         const outLabel = isLast ? '[vout]' : `[v${i + 1}]`
         videoFilterLines += `${currentInput}${drawtextFilters[i]}${outLabel};\n`
         currentInput = outLabel
       }
     } else {
-      // No effects — straight passthrough
       videoFilterLines = `[0:v]null[vout];\n`
     }
 
@@ -496,7 +554,7 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     logger.info(`assembleVideo [${jobId}]: filter script (${filterScriptContent.length} chars):\n${filterScriptContent}`)
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 6: Final render — all effects, audio, captions
+    // Step 6: Final render — CRF 16, slow preset, bitrate floor for 1080p HD
     // ═══════════════════════════════════════════════════════════════════════════
     logger.info(`assembleVideo [${jobId}]: final render`)
     await runRawFfmpeg([
@@ -508,8 +566,13 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
       '-map', '[aout]',
       '-c:v', 'libx264',
       '-c:a', 'aac',
-      '-crf', '18',
-      '-preset', 'medium',
+      // CRF 16 + slow preset = maximum quality at efficient bitrate
+      '-crf', '16',
+      '-preset', 'slow',
+      // Bitrate floor so fast scenes don't drop below broadcast quality
+      '-b:v', '8000k',
+      '-maxrate', '12000k',
+      '-bufsize', '24000k',
       '-r', '30',
       '-pix_fmt', 'yuv420p',
       '-t', String(options.videoLength + 10),
@@ -523,9 +586,3 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     fs.rmSync(workDir, { recursive: true, force: true })
   }
 }
-
-/**
- * Source viewport dimensions (must match browserRecorder.ts VIDEO_WIDTH/VIDEO_HEIGHT)
- */
-const VIDEO_W_SOURCE = 1920
-const VIDEO_H_SOURCE = 1080

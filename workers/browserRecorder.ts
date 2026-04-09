@@ -14,27 +14,139 @@ const VIDEO_HEIGHT = 1080
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 /**
- * CSS injected into every page to eliminate jank and lag in recordings.
- * Forces instant transitions and disables heavy animations that cause
- * frame drops in Playwright's video capture.
+ * CSS injected into every page to hide intrusive UI overlays.
+ * Does NOT kill animations — we want sites to look natural in recordings.
  */
-const ANTI_LAG_CSS = `
-  *, *::before, *::after {
-    animation-duration: 0.01s !important;
-    animation-delay: 0s !important;
-    transition-duration: 0.01s !important;
-    transition-delay: 0s !important;
-    scroll-behavior: auto !important;
-  }
+const POPUP_HIDE_CSS = `
   /* Hide cookie banners, modals, chat widgets that obscure the UI */
   [class*="cookie"], [class*="Cookie"],
   [id*="cookie"], [id*="Cookie"],
   [class*="consent"], [class*="Consent"],
   [class*="chat-widget"], [class*="intercom"],
-  [class*="crisp"], [class*="drift"] {
+  [class*="crisp"], [class*="drift"],
+  [class*="gdpr"], [class*="GDPR"],
+  [id*="chat-widget"], [id*="intercom-frame"] {
     display: none !important;
   }
 `
+
+/**
+ * CSS for the animated custom cursor injected into every recorded page.
+ * Renders a visible, glowing cursor that slides smoothly between interaction
+ * targets and pulses on click — all baked into the Playwright recording.
+ */
+const CUSTOM_CURSOR_CSS = `
+  #__teaser_cursor__ {
+    position: fixed !important;
+    width: 22px !important;
+    height: 22px !important;
+    border-radius: 50% !important;
+    background: rgba(255, 255, 255, 0.92) !important;
+    border: 2px solid rgba(255, 255, 255, 1) !important;
+    box-shadow:
+      0 0 0 3px rgba(99, 102, 241, 0.55),
+      0 0 14px rgba(99, 102, 241, 0.45),
+      0 2px 8px rgba(0, 0, 0, 0.5) !important;
+    pointer-events: none !important;
+    z-index: 2147483647 !important;
+    transform: translate(-50%, -50%) scale(1) !important;
+    transition:
+      left 0.28s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+      top 0.28s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+      transform 0.15s ease,
+      box-shadow 0.15s ease !important;
+    left: 960px !important;
+    top: 540px !important;
+  }
+  #__teaser_cursor__.clicking {
+    transform: translate(-50%, -50%) scale(0.58) !important;
+    box-shadow:
+      0 0 0 14px rgba(99, 102, 241, 0.18),
+      0 0 28px rgba(99, 102, 241, 0.65),
+      0 2px 8px rgba(0, 0, 0, 0.5) !important;
+  }
+  .teaser-ripple {
+    position: fixed !important;
+    border-radius: 50% !important;
+    background: transparent !important;
+    border: 2px solid rgba(255, 255, 255, 0.75) !important;
+    pointer-events: none !important;
+    z-index: 2147483646 !important;
+    transform: translate(-50%, -50%) !important;
+    animation: teaser-ripple-anim 0.72s ease-out forwards !important;
+  }
+  @keyframes teaser-ripple-anim {
+    from { width: 0px; height: 0px; opacity: 0.85; }
+    to   { width: 110px; height: 110px; opacity: 0; }
+  }
+`
+
+/**
+ * Injects the custom cursor element into the page.
+ * Idempotent — safe to call after every navigation.
+ */
+async function injectCustomCursor(page: Page): Promise<void> {
+  try {
+    await page.addStyleTag({ content: POPUP_HIDE_CSS + CUSTOM_CURSOR_CSS })
+    await page.evaluate(() => {
+      if (!document.getElementById('__teaser_cursor__')) {
+        const cursor = document.createElement('div')
+        cursor.id = '__teaser_cursor__'
+        document.body.appendChild(cursor)
+      }
+    })
+  } catch {
+    // Non-fatal — page may have navigated mid-inject
+  }
+}
+
+/**
+ * Smoothly moves the custom cursor to the given page coordinates.
+ * Waits 300ms for the CSS transition to play out in the recording.
+ */
+async function moveCursorTo(page: Page, x: number, y: number): Promise<void> {
+  try {
+    await page.evaluate(
+      ({ px, py }: { px: number; py: number }) => {
+        const cursor = document.getElementById('__teaser_cursor__') as HTMLElement | null
+        if (cursor) {
+          cursor.style.left = `${px}px`
+          cursor.style.top = `${py}px`
+        }
+      },
+      { px: x, py: y }
+    )
+    await page.waitForTimeout(300)
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * Triggers the click-pulse and ripple animation on the cursor element.
+ */
+async function triggerClickAnimation(page: Page, x: number, y: number): Promise<void> {
+  try {
+    await page.evaluate(
+      ({ px, py }: { px: number; py: number }) => {
+        const cursor = document.getElementById('__teaser_cursor__') as HTMLElement | null
+        if (cursor) {
+          cursor.classList.add('clicking')
+          setTimeout(() => cursor.classList.remove('clicking'), 420)
+        }
+        const ripple = document.createElement('div')
+        ripple.className = 'teaser-ripple'
+        ripple.style.left = `${px}px`
+        ripple.style.top = `${py}px`
+        document.body.appendChild(ripple)
+        setTimeout(() => ripple.remove(), 820)
+      },
+      { px: x, py: y }
+    )
+  } catch {
+    // Non-fatal
+  }
+}
 
 /**
  * Attempts to find an element on the page using multiple selector strategies.
@@ -47,7 +159,7 @@ async function findElement(
   if (!selector) return null
 
   const strategies = [
-    // 1. Direct CSS selector
+    // 1. Direct CSS selector (only useful when Gemini gives a real CSS selector)
     selector,
     // 2. Exact text match
     `text="${selector}"`,
@@ -61,13 +173,16 @@ async function findElement(
     `[title="${selector}"]`,
     // 7. Placeholder text (for inputs)
     `[placeholder="${selector}"]`,
-    // 8. Any element with text
+    // 8. Any element with text (broad fallback — longer timeout)
     `*:has-text("${selector}")`,
   ]
 
-  for (const strat of strategies) {
+  for (let i = 0; i < strategies.length; i++) {
+    const strat = strategies[i]
+    // Last strategy gets more time — it's the broadest fallback
+    const timeout = i === strategies.length - 1 ? 3000 : 2000
     try {
-      const el = await page.waitForSelector(strat, { state: 'visible', timeout: 4000 })
+      const el = await page.waitForSelector(strat, { state: 'visible', timeout })
       if (el) {
         logger.info(`findElement: found "${selector}" via strategy "${strat}"`)
         return el
@@ -147,6 +262,7 @@ async function attemptLogin(
 /**
  * Executes a single demo step action on the page.
  * Records click coordinates for post-processing zoom effects.
+ * Moves the custom cursor to each target before interacting.
  */
 async function executeStep(
   page: Page,
@@ -160,36 +276,44 @@ async function executeStep(
   try {
     switch (step.action) {
       case 'scroll_down':
-        await page.evaluate(() => window.scrollBy({ top: 500, behavior: 'smooth' }))
-        await page.waitForTimeout(1200)
+        await page.evaluate(() => window.scrollBy({ top: 600, behavior: 'smooth' }))
+        await page.waitForTimeout(1400)
         break
 
       case 'scroll_up':
-        await page.evaluate(() => window.scrollBy({ top: -500, behavior: 'smooth' }))
-        await page.waitForTimeout(1200)
+        await page.evaluate(() => window.scrollBy({ top: -600, behavior: 'smooth' }))
+        await page.waitForTimeout(1400)
         break
 
       case 'click': {
         const el = await findElement(page, step.element_to_click)
         if (el) {
-          // Get bounding box for zoom tracking
           const box = await el.boundingBox()
           if (box) {
+            const centerX = Math.round(box.x + box.width / 2)
+            const centerY = Math.round(box.y + box.height / 2)
+
             clickEvents.push({
-              x: Math.round(box.x + box.width / 2),
-              y: Math.round(box.y + box.height / 2),
+              x: centerX,
+              y: centerY,
               timestamp: elapsed,
               action: 'click',
             })
+
+            // Animate cursor to target, then click
+            await moveCursorTo(page, centerX, centerY)
+            await el.scrollIntoViewIfNeeded()
+            await page.waitForTimeout(400)
+            await triggerClickAnimation(page, centerX, centerY)
+            await el.click()
+          } else {
+            await el.click()
           }
-          // Scroll element into view first
-          await el.scrollIntoViewIfNeeded()
-          await page.waitForTimeout(500)
-          await el.click()
+
           // Wait for any navigation or content change
-          await page.waitForTimeout(2000)
-          // Re-inject anti-lag CSS in case page changed
-          await page.addStyleTag({ content: ANTI_LAG_CSS }).catch(() => {})
+          await page.waitForTimeout(2200)
+          // Re-inject cursor on the (potentially new) page
+          await injectCustomCursor(page)
         } else {
           logger.warn(`browserRecorder: step ${step.step} — click target "${step.element_to_click}" not found, skipping`)
         }
@@ -201,18 +325,23 @@ async function executeStep(
         if (el) {
           const box = await el.boundingBox()
           if (box) {
+            const centerX = Math.round(box.x + box.width / 2)
+            const centerY = Math.round(box.y + box.height / 2)
+
             clickEvents.push({
-              x: Math.round(box.x + box.width / 2),
-              y: Math.round(box.y + box.height / 2),
+              x: centerX,
+              y: centerY,
               timestamp: elapsed,
               action: 'hover',
             })
+
+            await moveCursorTo(page, centerX, centerY)
+            await el.scrollIntoViewIfNeeded()
+            await page.waitForTimeout(300)
+            await el.hover()
+            // Hold hover to show tooltip/animation
+            await page.waitForTimeout(2200)
           }
-          await el.scrollIntoViewIfNeeded()
-          await page.waitForTimeout(300)
-          await el.hover()
-          // Hold hover to show tooltip/animation
-          await page.waitForTimeout(2000)
         }
         break
       }
@@ -222,20 +351,26 @@ async function executeStep(
         if (el) {
           const box = await el.boundingBox()
           if (box) {
+            const centerX = Math.round(box.x + box.width / 2)
+            const centerY = Math.round(box.y + box.height / 2)
+
             clickEvents.push({
-              x: Math.round(box.x + box.width / 2),
-              y: Math.round(box.y + box.height / 2),
+              x: centerX,
+              y: centerY,
               timestamp: elapsed,
               action: 'type',
             })
+
+            await moveCursorTo(page, centerX, centerY)
+            await el.scrollIntoViewIfNeeded()
+            await page.waitForTimeout(300)
+            await triggerClickAnimation(page, centerX, centerY)
+            await el.click()
           }
-          await el.scrollIntoViewIfNeeded()
-          await page.waitForTimeout(300)
-          await el.click()
           const textToType = step.type_text ?? step.description ?? 'hello'
           // Type with realistic human-like delay
-          await page.keyboard.type(textToType, { delay: 80 })
-          await page.waitForTimeout(1500)
+          await page.keyboard.type(textToType, { delay: 75 })
+          await page.waitForTimeout(1600)
         }
         break
       }
@@ -245,15 +380,15 @@ async function executeStep(
         const targetUrl = step.navigate_to.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to, productUrl).href
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        // Re-inject anti-lag CSS on new page
-        await page.addStyleTag({ content: ANTI_LAG_CSS }).catch(() => {})
-        await page.waitForTimeout(1500)
+        await page.goto(targetUrl, { waitUntil: 'load', timeout: 30000 })
+        // Re-inject cursor on the new page
+        await injectCustomCursor(page)
+        await page.waitForTimeout(1800)
         break
       }
 
       case 'wait':
-        await page.waitForTimeout(2000)
+        await page.waitForTimeout(2200)
         break
 
       default:
@@ -267,7 +402,9 @@ async function executeStep(
 /**
  * Records a real product demo using a headless Chromium browser at 1080p HD.
  * Executes the full Gemini-generated demo flow with clicks, navigation, hover,
- * and typing. Tracks all interaction coordinates for post-processing zoom effects.
+ * and typing. Injects a custom animated cursor so all interactions are visually
+ * clear in the recording. Tracks all interaction coordinates for post-processing
+ * zoom effects.
  *
  * @returns Path to the recorded .webm video file
  */
@@ -285,12 +422,22 @@ export async function recordProduct(
   const browser = await chromium.launch({
     headless: true,
     args: [
-      '--disable-gpu-compositing',
+      // Use software OpenGL for consistent, artifact-free rendering
+      '--use-gl=swiftshader',
+      // Memory + sandbox
       '--disable-dev-shm-usage',
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      // Prevent Chrome throttling the headless tab
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      // Allow cross-origin iframe interactions
       '--disable-web-security',
-      '--disable-features=VizDisplayCompositor',
+      // Consistent color profile so colors match design
+      '--force-color-profile=srgb',
+      // Smooth scroll animations in recording
+      '--enable-smooth-scrolling',
     ],
   })
 
@@ -303,7 +450,6 @@ export async function recordProduct(
         dir: outputDir,
         size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
       },
-      // Disable media autoplay for cleaner recordings
       permissions: [],
     })
 
@@ -318,43 +464,41 @@ export async function recordProduct(
     // ─── Initial Load ───
     logger.info(`browserRecorder: navigating to ${productUrl}`)
     const response = await page.goto(productUrl, {
-      waitUntil: 'domcontentloaded',
+      // 'load' waits for all resources, giving sites time to fully render
+      waitUntil: 'load',
       timeout: 60000,
     })
     if (!response || !response.ok()) {
       throw new Error(`Could not access the product URL. Status: ${response?.status() ?? 'unknown'}`)
     }
 
-    // Inject anti-lag CSS immediately
-    await page.addStyleTag({ content: ANTI_LAG_CSS }).catch(() => {})
-
-    // Wait for page to be fully interactive (shorter than before)
-    await page.waitForTimeout(2500)
+    // Let the page fully settle, then inject our cursor
+    await page.waitForTimeout(2800)
+    await injectCustomCursor(page)
 
     // Optional login
     if (credentials) {
       await attemptLogin(page, credentials)
-      await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
-      await page.addStyleTag({ content: ANTI_LAG_CSS }).catch(() => {})
+      await page.goto(productUrl, { waitUntil: 'load', timeout: 45000 }).catch(() => {})
+      await injectCustomCursor(page)
     }
 
-    // Brief stabilization pause
+    // Brief stabilization pause before recording starts
     await page.waitForTimeout(1500)
 
     const recordingStartTime = Date.now()
 
     // ─── Execute Demo Flow ───
-    // No more auto-scroll — the Gemini demo_flow drives ALL interactions
     logger.info(`browserRecorder: executing ${demoFlow.length} demo steps`)
     for (const step of demoFlow) {
       logger.info(`browserRecorder: step ${step.step} — ${step.action}: ${step.description}`)
       await executeStep(page, step, productUrl, clickEvents, recordingStartTime)
       // Brief pause between steps for visual clarity
-      await page.waitForTimeout(1000)
+      await page.waitForTimeout(900)
     }
 
     // Final pause to capture the last frame cleanly
-    await page.waitForTimeout(2000)
+    await page.waitForTimeout(2200)
     await context.close()
   } finally {
     await browser.close()

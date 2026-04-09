@@ -1,6 +1,6 @@
 # Teaser — Project State
 Last updated: 2026-04-09
-Status: VIDEO PIPELINE OVERHAULED — PREMIUM 1080p OUTPUT
+Status: VIDEO PIPELINE — FULL QUALITY & INTERACTION OVERHAUL (Phase 10)
 What Is Built:
 - Phase 1: Next.js 16 + TypeScript strict + Tailwind + all dependencies installed
 - Phase 2: Core infrastructure (types, logger, Supabase clients, utils, Gemini, Firecrawl, BullMQ queue, SQL schema)
@@ -11,32 +11,45 @@ What Is Built:
 - Phase 7: BullMQ video pipeline worker + FFmpeg video assembler with premium post-processing
 - Phase 8: .env.local.example, README.md, final reviewer pass and fixes
 - Phase 9: Video pipeline overhaul — 1080p, rich interaction, premium output
-Recent Overhaul (Phase 9):
-- Upgraded recording resolution from 720p to 1920×1080 (Full HD)
-- Upgraded FFmpeg encoding: CRF 18, medium preset (was CRF 23, fast)
-- Gemini prompt now generates 10–20 step interactive demo flows (clicks, nav, hover, type)
-- Browser recorder: anti-lag CSS injection, resource blocking, smart 8-strategy element finder
-- Browser recorder: hover/type actions, click coordinate tracking for zoom effects
-- Video assembler: dark gradient background framing (browser centered with padding)
-- Video assembler: premium intro (gradient + product name fade-in + tagline)
-- Video assembler: premium outro (gradient + CTA text + fade-out)
-- Video assembler: auto-zoom on first click using split/crop/overlay
-- Video assembler: improved captions (28px, boxborderw=12, black@0.65 pills)
-- Removed dumb auto-scroll — Gemini demo_flow drives ALL browser interactions
-- Added ClickEvent type for cursor tracking, DemoAction now includes hover/type
-- TTS migrated to Gemini TTS (no more ElevenLabs dependency for voice)
+- Phase 10: Full quality & interaction overhaul — smooth rendering, animated cursor, multi-click zoom, drop shadow, higher quality encoding
+Recent Overhaul (Phase 10):
+Browser Recorder (workers/browserRecorder.ts):
+- REMOVED --disable-gpu-compositing and --disable-features=VizDisplayCompositor — these were killing render quality and causing frame drops
+- Added --use-gl=swiftshader, --disable-background-timer-throttling, --disable-renderer-backgrounding for smooth consistent rendering
+- REMOVED animation-killing anti-lag CSS (animation-duration: 0.01s) — sites now look natural with all animations intact
+- Kept only popup/banner hiding CSS (renamed POPUP_HIDE_CSS)
+- Injected animated custom cursor into every recorded page: 22px white circle with indigo glow ring, smooth CSS transition (left/top 0.28s ease) so cursor visibly slides to each target before clicking
+- Click animation: cursor scales down + ripple ring expands and fades outward — all baked into the recording
+- Cursor re-injected after every page navigation (idempotent)
+- Element finder timeout reduced 4000ms → 2000ms per strategy (fail-fast); broad fallback stays 3000ms — max wait drops from 32s to ~18s
+- waitUntil changed from domcontentloaded → load so JS-heavy sites fully render before interactions
+Video Assembler (workers/videoAssembler.ts):
+- Multi-click zoom: new buildZoomFilterChain() applies zoom at every click (up to 6, deduped by 3s spacing) using chained split→crop→scale→overlay per click; zoom factor 1.2x → 1.3x
+- Drop shadow: browser window now has a blurred shadow copy overlaid 20px right / 24px down behind it
+- Gradient background upgraded: deep navy-to-indigo using both X and Y gradients (richer than single-axis)
+- Final render quality: CRF 18/medium → CRF 16/slow + bitrate floor 8000k/maxrate 12000k
+- Intermediate files now use veryfast preset (throwaway temp files, quality is in CRF)
+- Captions: fontsize 28→30, boxborderw 12→14, opacity 0.65→0.72, max line 65→60 chars
+- Fixed filter graph bug: zoom chain already embedded [0:v] input label, was being doubled
+Gemini (lib/gemini.ts):
+- Added ELEMENT TARGETING RULES: instructs Gemini to use visible button text (e.g. "Get Started") never CSS class names — root cause of failed clicks
+- Added TIMING RULES: explicit wait steps after every CTA click and navigate, minimum 15 steps, emphasis on actual product functionality not just landing page
 What Works:
 - tsc --noEmit passes with ZERO errors
 - next build passes cleanly
 - All 7 routes visible in build output
-- Video pipeline produces 1080p HD output with gradient framing and branded intro/outro
+- Browser records with visible animated cursor and natural site animations
+- Auto-zoom on ALL click events (up to 6) not just first
+- Drop shadow behind browser window in framed composition
+- CRF 16 / slow preset / bitrate floor for maximum 1080p quality
 What Is Broken: Nothing known. E2E test pending with real product URL.
 Current Focus: Ready for end-to-end testing
 Next Actions:
-1. Run pnpm dev and test video generation with a real product URL
-2. Verify the output video has gradient background, intro/outro, and click zoom
-3. Tweak Gemini demo_flow prompt based on real output quality
-4. Deploy to production
+1. Run pnpm dev + pnpm worker and test with a real product URL
+2. Verify cursor animations visible in recording
+3. Verify multi-click zoom fires at each interaction point
+4. Verify site animations play naturally (no frozen/snapping)
+5. Deploy to production
 Architecture Decisions Made:
 - pnpm as package manager
 - Dark-only design system
@@ -47,9 +60,9 @@ Architecture Decisions Made:
 - Gemini TTS (gemini-2.5-flash-preview-tts) for voiceover generation
 - Firecrawl for web scraping
 - fluent-ffmpeg + raw spawn for video assembly (not Remotion)
-- Two-pass framing: generate gradient PNG → overlay browser recording
-- Auto-zoom uses split/crop/scale/overlay with enable (reliable, avoids complex zoompan)
-- Anti-lag CSS injected after every page load to eliminate recording jank
+- Two-pass framing: generate gradient PNG → overlay browser recording with drop shadow
+- Multi-click zoom uses chained split/crop/scale/overlay with enable (reliable, avoids complex zoompan)
+- Custom cursor injected into page DOM (not FFmpeg overlay) so it renders naturally in Playwright recording
 - Click events tracked to sidecar JSON for post-processing zoom
 - retryWithBackoff lives in /lib/utils.ts (no circular imports)
 - createServiceClient() only in /workers/ (never in /app/ or /components/)
