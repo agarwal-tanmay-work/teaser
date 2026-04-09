@@ -1,7 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
+import { createBrowserClient } from '@/lib/supabase'
 
 interface AppSidebarProps {
   userEmail: string
@@ -18,29 +19,20 @@ const navItems = [
       </svg>
     ),
   },
-  {
-    href: '/dashboard/new',
-    label: 'New Video',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
-      </svg>
-    ),
-  },
-  {
-    href: '/dashboard/history',
-    label: 'History',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-  },
 ]
 
-/** Fixed left sidebar for the authenticated app. Shows navigation and user info. */
+/** Fixed left sidebar for the authenticated app. Shows navigation, user info, and sign out. */
 export default function AppSidebar({ userEmail, initials }: AppSidebarProps) {
   const pathname = usePathname()
+  const router = useRouter()
+  const supabase = createBrowserClient()
+
+  /** Signs the user out and redirects to the landing page. */
+  async function handleSignOut() {
+    await supabase.auth.signOut()
+    router.push('/')
+    router.refresh()
+  }
 
   return (
     <aside className="fixed left-0 top-0 bottom-0 w-60 bg-[#0A0A0A] border-r border-[#1F1F1F] flex flex-col z-40">
@@ -70,14 +62,23 @@ export default function AppSidebar({ userEmail, initials }: AppSidebarProps) {
         })}
       </nav>
 
-      {/* User info */}
-      <div className="px-3 py-4 border-t border-[#1F1F1F]">
+      {/* User info + sign out */}
+      <div className="px-3 py-4 border-t border-[#1F1F1F] space-y-1">
         <div className="flex items-center gap-3 px-3 py-2">
           <div className="w-8 h-8 rounded-full bg-[#111111] border border-[#1F1F1F] flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
             {initials}
           </div>
-          <span className="text-[#6E6E6E] text-xs truncate">{userEmail}</span>
+          <span className="text-[#6E6E6E] text-xs truncate flex-1">{userEmail}</span>
         </div>
+        <button
+          onClick={handleSignOut}
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-[#6E6E6E] hover:text-white hover:bg-[#111111] transition-colors"
+        >
+          <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
+          Sign out
+        </button>
       </div>
     </aside>
   )

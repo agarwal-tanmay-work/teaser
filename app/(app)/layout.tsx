@@ -6,7 +6,7 @@ import AppSidebar from '@/components/dashboard/AppSidebar'
 
 /**
  * Layout for all authenticated app routes under /(app).
- * Redirects to / if the user has no active session.
+ * Redirects to /login if the user has no active session.
  * Renders a fixed sidebar and main content area.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
@@ -32,7 +32,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   } = await supabase.auth.getSession()
 
   if (!session) {
-    redirect('/')
+    redirect('/login')
   }
 
   const userEmail = session.user.email ?? ''

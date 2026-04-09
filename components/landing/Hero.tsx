@@ -10,9 +10,9 @@ export default function Hero() {
 
   const handleCreateVideo = () => {
     if (url.trim()) {
-      router.push(`/dashboard?url=${encodeURIComponent(url.trim())}`)
+      router.push(`/login?next=/dashboard&url=${encodeURIComponent(url.trim())}`)
     } else {
-      router.push('/dashboard')
+      router.push('/login')
     }
   }
 
