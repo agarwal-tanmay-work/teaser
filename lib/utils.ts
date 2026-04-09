@@ -18,20 +18,19 @@ export function sleep(ms: number): Promise<void> {
 
 /**
  * Retries an async function with exponential backoff.
- * Attempt 1: immediate. Attempt 2: after 1000ms. Attempt 3: after 2000ms.
  * Throws after all attempts are exhausted.
  * @param fn - The async function to retry
- * @param attempts - Maximum number of attempts (default: 3)
+ * @param attempts - Maximum number of attempts (default: 5)
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  attempts: number = 3
+  attempts: number = 5
 ): Promise<T> {
-  const delays = [0, 1000, 2000]
+  const delays = [0, 2000, 5000, 10000, 15000]
 
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {
-      await sleep(delays[i] ?? 2000)
+      await sleep(delays[i] ?? 15000)
     }
     try {
       return await fn()

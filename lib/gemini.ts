@@ -6,157 +6,180 @@ import { logger } from '@/lib/logger'
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
 
 /**
- * Gets the Gemini 1.5 Pro model instance.
+ * Ordered list of models to try. If the first model fails (e.g. 503 overload),
+ * the next one is attempted automatically.
  */
-function getModel() {
-  return genAI.getGenerativeModel({ model: 'gemini-1.5-pro' })
+const MODEL_CHAIN = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+
+/**
+ * Tries to generate content using the model fallback chain.
+ * Each model gets full retry-with-backoff treatment before moving on.
+ */
+async function generateWithFallback(
+  systemInstruction: string,
+  prompt: string
+): Promise<string> {
+  let lastError: Error | null = null
+
+  for (const modelName of MODEL_CHAIN) {
+    try {
+      logger.info(`gemini: trying model ${modelName}`)
+      const result = await retryWithBackoff(async () => {
+        const model = genAI.getGenerativeModel({ model: modelName, systemInstruction })
+        const res = await model.generateContent(prompt)
+        return res.response.text().trim()
+      })
+      return result
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      logger.warn(`gemini: model ${modelName} failed, trying next fallback`, {
+        error: lastError.message,
+      })
+    }
+  }
+
+  throw lastError ?? new Error('All Gemini models failed')
+}
+
+/**
+ * Extracts a JSON string from a text block, even if it contains Conversational
+ * leading/trailing text or markdown fences.
+ */
+function extractJson(text: string): string {
+  // If no JSON-like content found, return as-is (JSON.parse will catch it)
+  if (!text.includes('{')) return text
+
+  // 1. Try to find content between triple backticks
+  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i
+  const match = text.match(codeBlockRegex)
+  if (match?.[1]) return match[1].trim()
+
+  // 2. Fallback: Find the first '{' and last '}'
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start !== -1 && end !== -1 && end > start) {
+    return text.slice(start, end + 1).trim()
+  }
+
+  return text.trim()
 }
 
 /**
  * Analyzes a scraped product page and returns a structured ProductUnderstanding.
- * Uses retryWithBackoff internally for resilience against transient API failures.
- * @param productUrl - The URL of the product being analyzed
- * @param scrapedContent - Markdown content scraped from the product site
- * @param description - Optional user-provided description of the product
  */
 export async function understandProduct(
   productUrl: string,
   scrapedContent: string,
   description?: string
 ): Promise<ProductUnderstanding> {
-  return retryWithBackoff(async () => {
-    const model = getModel()
+  const systemInstruction =
+    'You are an expert product analyst. Analyze products and return ONLY valid JSON — no markdown, no code fences, no explanation.'
 
-    const systemInstruction = `You are an expert product analyst and UX researcher. You have deep knowledge of SaaS products, startup launches, and what makes a compelling product demo video. Analyze the provided product information thoroughly.`
-
-    const userPrompt = `Analyze this product and return ONLY valid JSON with no markdown formatting, no code blocks, no explanation. Return exactly this structure:
+  const prompt = `Analyze this product and return ONLY valid JSON matching this exact structure:
 {
   "product_name": "string",
   "tagline": "string (one punchy sentence)",
-  "core_value_prop": "string (what problem it solves and how)",
-  "target_audience": "string (who uses this and why)",
-  "top_5_features": ["string", "string", "string", "string", "string"],
-  "brand_tone": "string (professional/playful/technical/friendly)",
-  "product_category": "string (e.g. project management, CRM, analytics)",
-  "problem_being_solved": "string (the specific pain point addressed)",
+  "core_value_prop": "string",
+  "target_audience": "string",
+  "top_5_features": ["string","string","string","string","string"],
+  "brand_tone": "string",
+  "product_category": "string",
+  "problem_being_solved": "string",
   "key_pages_to_visit": ["string"],
   "demo_flow": [
     {
       "step": 1,
-      "action": "string (scroll_down/scroll_up/click/navigate/wait)",
-      "description": "string (what this step shows the viewer)",
-      "element_to_click": "string (optional, button text or element description)",
-      "navigate_to": "string (optional, URL path to navigate to)"
+      "action": "navigate",
+      "description": "string",
+      "element_to_click": "string (optional)",
+      "navigate_to": "string (optional)"
     }
   ]
 }
 
 Product URL: ${productUrl}
 User description: ${description ?? 'Not provided'}
-Scraped content: ${scrapedContent.slice(0, 8000)}`
+Scraped content:
+${scrapedContent.slice(0, 10000)}`
 
-    const result = await model.generateContent({
-      systemInstruction,
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    })
+  const text = await generateWithFallback(systemInstruction, prompt)
+  const jsonText = extractJson(text)
 
-    const text = result.response.text().trim()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonText)
+  } catch {
+    logger.error('understandProduct: Gemini returned non-JSON', { raw: text.slice(0, 500) })
+    throw new Error('Gemini returned malformed JSON. Please try again.')
+  }
 
-    // Strip any markdown code fences if Gemini wraps the response
-    const jsonText = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
+  const p = parsed as Record<string, unknown>
+  if (
+    !p.product_name ||
+    !p.tagline ||
+    !Array.isArray(p.demo_flow) ||
+    p.demo_flow.length === 0
+  ) {
+    logger.error('understandProduct: missing required fields', { parsed })
+    throw new Error('Gemini response was missing required fields. Please try again.')
+  }
 
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(jsonText)
-    } catch {
-      logger.error('understandProduct: failed to parse Gemini JSON response', { raw: jsonText.slice(0, 500) })
-      throw new Error('Gemini returned invalid JSON for product understanding')
-    }
-
-    // Validate required fields
-    const p = parsed as Record<string, unknown>
-    if (
-      typeof p.product_name !== 'string' ||
-      typeof p.tagline !== 'string' ||
-      typeof p.core_value_prop !== 'string' ||
-      typeof p.target_audience !== 'string' ||
-      !Array.isArray(p.top_5_features) ||
-      typeof p.brand_tone !== 'string' ||
-      typeof p.product_category !== 'string' ||
-      typeof p.problem_being_solved !== 'string' ||
-      !Array.isArray(p.key_pages_to_visit) ||
-      !Array.isArray(p.demo_flow)
-    ) {
-      throw new Error('Gemini response missing required fields for ProductUnderstanding')
-    }
-
-    return parsed as ProductUnderstanding
-  })
+  return parsed as ProductUnderstanding
 }
 
 /**
  * Generates a professional video script timed to the recorded demo.
- * Uses retryWithBackoff internally for resilience against transient API failures.
- * @param understanding - The structured product understanding from understandProduct()
- * @param tone - The desired tone for the narration
- * @param videoLength - The target video length in seconds
  */
 export async function generateScript(
   understanding: ProductUnderstanding,
   tone: VideoTone,
   videoLength: VideoLength
 ): Promise<VideoScript> {
-  return retryWithBackoff(async () => {
-    const model = getModel()
+  const systemInstruction =
+    'You are a world-class product video scriptwriter. Return ONLY valid JSON — no markdown, no code fences, no explanation.'
 
-    const systemInstruction = `You are a world-class product video scriptwriter who has written scripts for the top 100 ProductHunt launches. You know exactly how to hook viewers in the first 5 seconds, build excitement around a product, and drive action at the end.`
-
-    const userPrompt = `Write a ${videoLength}-second professional video script for ${understanding.product_name}. Return ONLY valid JSON with no markdown, no code blocks, no explanation. Structure:
+  const prompt = `Write a ${videoLength}-second product launch video script for "${understanding.product_name}".
+Return ONLY valid JSON:
 {
   "total_duration": ${videoLength},
   "segments": [
     {
       "start_time": 0,
       "end_time": 5,
-      "narration": "string (exact words to be spoken)",
-      "what_to_show": "string (what should be visible on screen)",
-      "zoom_target": "string (optional, element to zoom into)"
+      "narration": "exact words to speak",
+      "what_to_show": "what appears on screen",
+      "zoom_target": "optional element to zoom"
     }
   ]
 }
 
-Required structure:
-- Hook (0-5s): Start with the pain point
-- Solution reveal (5-15s): Introduce ${understanding.product_name}
-- Feature walkthrough (15s to ${videoLength - 5}s): Narrate each key feature being shown
-- Strong CTA (last 5s): Drive action
+Rules:
+- Hook (0-5s): open with the pain point
+- Solution (5-15s): introduce ${understanding.product_name}
+- Features (15-${videoLength - 5}s): narrate each feature
+- CTA (last 5s): strong call to action
+- Tone: ${tone}
+- Audience: ${understanding.target_audience}
+- Value prop: ${understanding.core_value_prop}
+- Features: ${understanding.top_5_features.join(', ')}`
 
-Tone: ${tone}
-Target audience: ${understanding.target_audience}
-Core value prop: ${understanding.core_value_prop}
-Top features: ${understanding.top_5_features.join(', ')}`
+  const text = await generateWithFallback(systemInstruction, prompt)
+  const jsonText = extractJson(text)
 
-    const result = await model.generateContent({
-      systemInstruction,
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    })
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonText)
+  } catch {
+    logger.error('generateScript: Gemini returned non-JSON', { raw: text.slice(0, 500) })
+    throw new Error('Gemini returned malformed JSON for script. Please try again.')
+  }
 
-    const text = result.response.text().trim()
-    const jsonText = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
+  const p = parsed as Record<string, unknown>
+  if (typeof p.total_duration !== 'number' || !Array.isArray(p.segments) || p.segments.length === 0) {
+    logger.error('generateScript: missing required fields', { parsed })
+    throw new Error('Gemini script response was missing required fields. Please try again.')
+  }
 
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(jsonText)
-    } catch {
-      logger.error('generateScript: failed to parse Gemini JSON response', { raw: jsonText.slice(0, 500) })
-      throw new Error('Gemini returned invalid JSON for video script')
-    }
-
-    const p = parsed as Record<string, unknown>
-    if (typeof p.total_duration !== 'number' || !Array.isArray(p.segments)) {
-      throw new Error('Gemini response missing required fields for VideoScript')
-    }
-
-    return parsed as VideoScript
-  })
+  return parsed as VideoScript
 }
+

@@ -7,17 +7,16 @@ import type { DemoStep } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
 
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+
 /**
  * Attempts to log in to a product using provided credentials.
- * Looks for common username/email and password input patterns.
- * Silently skips if login form is not found within 5 seconds.
  */
 async function attemptLogin(
   page: Page,
   credentials: { username: string; password: string }
 ): Promise<void> {
   try {
-    // Try to find a username/email field
     const usernameSelectors = [
       'input[type="email"]',
       'input[name="email"]',
@@ -28,7 +27,7 @@ async function attemptLogin(
     let usernameField = null
     for (const selector of usernameSelectors) {
       try {
-        usernameField = await page.waitForSelector(selector, { timeout: 3000 })
+        usernameField = await page.waitForSelector(selector, { state: 'visible', timeout: 3000 })
         if (usernameField) break
       } catch {
         continue
@@ -43,11 +42,11 @@ async function attemptLogin(
     await usernameField.fill(credentials.username)
 
     const passwordField = await page.waitForSelector('input[type="password"]', {
+      state: 'visible',
       timeout: 3000,
     })
     await passwordField.fill(credentials.password)
 
-    // Submit — try common submit selectors
     const submitSelectors = [
       'button[type="submit"]',
       'input[type="submit"]',
@@ -61,9 +60,7 @@ async function attemptLogin(
         const btn = await page.$(selector)
         if (btn) {
           await btn.click()
-          await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 }).catch(() => {
-            // Navigation may not happen on SPAs — continue anyway
-          })
+          await page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {})
           break
         }
       } catch {
@@ -71,15 +68,12 @@ async function attemptLogin(
       }
     }
   } catch (error) {
-    logger.warn('browserRecorder.attemptLogin: login attempt failed, continuing without auth', {
-      error,
-    })
+    logger.warn('browserRecorder.attemptLogin: login attempt failed, continuing without auth', { error })
   }
 }
 
 /**
  * Executes a single demo step action on the page.
- * Wrapped in try/catch so a failed step never crashes the whole recording.
  */
 async function executeStep(
   page: Page,
@@ -89,22 +83,15 @@ async function executeStep(
   try {
     switch (step.action) {
       case 'scroll_down':
-        await page.evaluate(() =>
-          window.scrollBy({ top: 400, behavior: 'smooth' })
-        )
+        await page.evaluate(() => window.scrollBy({ top: 400, behavior: 'smooth' }))
         break
 
       case 'scroll_up':
-        await page.evaluate(() =>
-          window.scrollBy({ top: -400, behavior: 'smooth' })
-        )
+        await page.evaluate(() => window.scrollBy({ top: -400, behavior: 'smooth' }))
         break
 
       case 'click': {
-        if (!step.element_to_click) {
-          logger.warn(`browserRecorder.executeStep: step ${step.step} has no element_to_click`)
-          break
-        }
+        if (!step.element_to_click) break
         const el = step.element_to_click
         const clickSelectors = [
           el,
@@ -116,7 +103,7 @@ async function executeStep(
         let clicked = false
         for (const selector of clickSelectors) {
           try {
-            const handle = await page.$(selector)
+            const handle = await page.waitForSelector(selector, { state: 'visible', timeout: 5000 })
             if (handle) {
               await handle.click()
               clicked = true
@@ -127,22 +114,17 @@ async function executeStep(
           }
         }
         if (!clicked) {
-          logger.warn(
-            `browserRecorder.executeStep: could not find element "${el}" for step ${step.step}, skipping`
-          )
+          logger.warn(`browserRecorder.executeStep: could not find element "${el}" for step ${step.step}`)
         }
         break
       }
 
       case 'navigate': {
-        if (!step.navigate_to) {
-          logger.warn(`browserRecorder.executeStep: step ${step.step} has no navigate_to`)
-          break
-        }
+        if (!step.navigate_to) break
         const targetUrl = step.navigate_to.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to, productUrl).href
-        await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 15000 })
+        await page.goto(targetUrl, { waitUntil: 'load', timeout: 30000 })
         break
       }
 
@@ -151,7 +133,7 @@ async function executeStep(
         break
 
       default:
-        logger.warn(`browserRecorder.executeStep: unknown action "${step.action as string}" at step ${step.step}`)
+        logger.warn(`browserRecorder.executeStep: unknown action "${step.action}"`)
     }
   } catch (error) {
     logger.warn(`browserRecorder.executeStep: step ${step.step} failed, skipping`, { error })
@@ -160,16 +142,6 @@ async function executeStep(
 
 /**
  * Records a real product demo using a headless Chromium browser.
- * Navigates the product according to the provided demo flow and saves the session
- * as a .webm video file in /tmp/recordings/[jobId]/.
- *
- * Each demo step is wrapped in try/catch so a single failure never aborts the recording.
- *
- * @param productUrl - The product URL to record
- * @param demoFlow - Ordered list of actions to perform during the recording
- * @param jobId - Used to create an isolated temp directory for this recording
- * @param credentials - Optional login credentials if the product requires authentication
- * @returns Absolute path to the recorded .webm file
  */
 export async function recordProduct(
   productUrl: string,
@@ -185,6 +157,7 @@ export async function recordProduct(
   try {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
+      userAgent: USER_AGENT,
       recordVideo: {
         dir: outputDir,
         size: { width: 1280, height: 720 },
@@ -193,40 +166,58 @@ export async function recordProduct(
 
     const page = await context.newPage()
 
-    // Optional login flow before navigating to the product
-    if (credentials) {
-      await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 30000 })
-      await attemptLogin(page, credentials)
+    // ─── Initial Load (Fail-Fast) ───
+    logger.info(`browserRecorder: navigating to ${productUrl}`)
+    const response = await page.goto(productUrl, { waitUntil: 'load', timeout: 60000 })
+    if (!response || !response.ok()) {
+      throw new Error(`Could not access the product URL. Status: ${response?.status() ?? 'unknown'}`)
     }
 
-    // Navigate to the product and let it fully load
-    await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 30000 })
-    await page.waitForTimeout(2000)
+    // Wait for the page to settle a bit
+    await page.waitForTimeout(5000)
 
-    // Execute each demo step with a pause between steps
+    // Optional login
+    if (credentials) {
+      await attemptLogin(page, credentials)
+      // Re-navigate or wait after login to ensure we're where we need to be
+      await page.goto(productUrl, { waitUntil: 'load', timeout: 45000 }).catch(() => {})
+    }
+
+    // Initial stabilization pause
+    await page.waitForTimeout(5000)
+
+    // Auto-scroll
+    await page.evaluate(async () => {
+      const delay = (ms: number) => new Promise(r => setTimeout(r, ms))
+      const scrollStep = 300
+      const maxScroll = document.body.scrollHeight
+      for (let y = 0; y < maxScroll; y += scrollStep) {
+        window.scrollTo({ top: y, behavior: 'smooth' })
+        await delay(800)
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      await delay(1500)
+    })
+
+    // Execute steps
     for (const step of demoFlow) {
       await executeStep(page, step, productUrl)
-      await page.waitForTimeout(1500)
+      await page.waitForTimeout(3000)
     }
 
-    // Final pause to capture the last screen state
-    await page.waitForTimeout(3000)
-
-    // Closing the context triggers Playwright to write the .webm file
+    await page.waitForTimeout(5000)
     await context.close()
   } finally {
     await browser.close()
   }
 
-  // Locate the generated .webm file
   const files = fs.readdirSync(outputDir)
   const videoFile = files.find((f) => f.endsWith('.webm'))
 
   if (!videoFile) {
-    throw new Error(
-      'Playwright recording failed — no video file was created. Check browser permissions.'
-    )
+    throw new Error('Playwright recording failed — no video file was created.')
   }
 
   return path.join(outputDir, videoFile)
 }
+

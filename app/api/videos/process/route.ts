@@ -5,12 +5,37 @@ import { createServerClient as createSSRClient } from '@supabase/ssr'
 import { createServiceClient } from '@/lib/supabase'
 import { scrapeUrl } from '@/lib/firecrawl'
 import { understandProduct, generateScript } from '@/lib/gemini'
-import { generateVoiceover } from '@/lib/elevenlabs'
+import { generateVoiceover } from '@/lib/tts'
 import { logger } from '@/lib/logger'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { ProductUnderstanding, VideoScript, ApiResponse } from '@/types'
+import { validateFfmpeg } from '@/workers/videoAssembler'
+
+/**
+ * Performs a fast check of all critical dependencies before the heavy pipeline starts.
+ * Rejects with a clear error if any dependency is missing.
+ */
+async function performPreFlightCheck(): Promise<void> {
+  // 1. Check Gemini
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is missing in your .env.local file.')
+  }
+  
+  // 2. Check Firecrawl
+  if (!process.env.FIRECRAWL_API_KEY) {
+    throw new Error('FIRECRAWL_API_KEY is missing. Please add it to your .env.local file.')
+  }
+
+  // 3. Check FFmpeg (absolute path or standard)
+  try {
+    await validateFfmpeg()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`FFmpeg Pre-flight check failed: ${msg}. Make sure FFmpeg is installed and accessible.`)
+  }
+}
 
 /**
  * Allow up to 10 minutes — the pipeline is long-running.
@@ -133,11 +158,17 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
   const db = createServiceClient()
 
   const voiceoverDir = path.join(os.tmpdir(), 'teaser-voiceovers')
-  const voiceoverPath = path.join(voiceoverDir, `${jobId}.mp3`)
+  let voiceoverPath = path.join(voiceoverDir, `${jobId}.mp3`)
   let recordingPath = ''
+  let finalVideoPath = ''
 
   try {
     logger.info(`pipeline [${jobId}]: starting for ${productUrl}`)
+    
+    // ── Pre-flight Check (0 → 2%) ──────────────────────────────────────────
+    await updateProgress(jobId, 1, 'Checking system readiness (AI, FFmpeg)...')
+    await performPreFlightCheck()
+    await updateProgress(jobId, 2, 'System ready. Moving to scraping...')
 
     // ── Stage 1: Scrape (0 → 10%) ─────────────────────────────────────────
     await updateProgress(jobId, 3, 'Reading your product website...')
@@ -155,9 +186,10 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     let understanding: ProductUnderstanding
     try {
       understanding = await understandProduct(productUrl, scrapedContent, description)
-    } catch {
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
       throw new Error(
-        'Failed to analyse your product. Check that GEMINI_API_KEY is set correctly.'
+        `Failed to analyse your product: ${detail}`
       )
     }
     await db.from('video_jobs').update({ product_understanding: understanding }).eq('id', jobId)
@@ -183,9 +215,10 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     let script: VideoScript
     try {
       script = await generateScript(understanding, tone, video_length)
-    } catch {
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
       throw new Error(
-        'Failed to generate the video script. Check that GEMINI_API_KEY is set correctly.'
+        `Failed to generate the video script: ${detail}`
       )
     }
     await db.from('video_jobs').update({ script }).eq('id', jobId)
@@ -196,19 +229,25 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     fs.mkdirSync(voiceoverDir, { recursive: true })
     const fullScript = script.segments.map((s) => s.narration).join(' ')
     try {
-      await generateVoiceover(fullScript, tone, voiceoverPath)
-    } catch {
+      voiceoverPath = await generateVoiceover(fullScript, tone, voiceoverPath)
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
       throw new Error(
-        'Voiceover generation failed. Check that ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID are set correctly.'
+        `Voiceover generation failed: ${detail}`
       )
     }
     await updateProgress(jobId, 70, 'Voiceover done. Editing the video...')
 
     // ── Stage 5: Assemble (70 → 90%) ──────────────────────────────────────
-    await updateProgress(jobId, 73, 'Running FFmpeg — adding captions, intro, outro...')
-    let finalVideoPath: string
+    await updateProgress(jobId, 73, 'Initializing video engine...')
     try {
       const { assembleVideo } = await import('@/workers/videoAssembler')
+      
+      // Sub-stages for progress feel
+      setTimeout(() => updateProgress(jobId, 75, 'Converting recording to MP4...'), 1000)
+      setTimeout(() => updateProgress(jobId, 80, 'Creating branding & intro...'), 5000)
+      setTimeout(() => updateProgress(jobId, 85, 'Mixing audio & captions...'), 10000)
+
       finalVideoPath = await assembleVideo({
         recordingPath,
         voiceoverPath,
@@ -219,9 +258,10 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      logger.error(`pipeline [${jobId}]: assembly failed`, { error: msg })
       throw new Error(
-        msg.toLowerCase().includes('ffmpeg') || msg.toLowerCase().includes('spawn')
-          ? 'FFmpeg not found. Install it: winget install ffmpeg (then restart your terminal)'
+        msg.toLowerCase().includes('ffmpeg') || msg.toLowerCase().includes('spawn') || msg.toLowerCase().includes('enoent')
+          ? `FFmpeg Error: ${msg}. (Binary path: ${path.join(os.tmpdir(), 'debug-ffmpeg-path.txt')})`
           : `Video assembly failed: ${msg}`
       )
     }
@@ -251,12 +291,10 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
       completed_at: new Date().toISOString(),
     }).eq('id', jobId)
 
-    // Cleanup temp files
-    try {
-      if (recordingPath) fs.rmSync(path.dirname(recordingPath), { recursive: true, force: true })
-      if (fs.existsSync(voiceoverPath)) fs.rmSync(voiceoverPath, { force: true })
-      if (fs.existsSync(finalVideoPath)) fs.rmSync(finalVideoPath, { force: true })
-    } catch { /* non-critical */ }
+    // Cleanup temp files safely
+    try { if (recordingPath) fs.rmSync(path.dirname(recordingPath), { recursive: true, force: true }) } catch {}
+    try { if (voiceoverPath && fs.existsSync(voiceoverPath)) fs.rmSync(voiceoverPath, { force: true }) } catch {}
+    try { if (typeof finalVideoPath !== 'undefined' && finalVideoPath && fs.existsSync(finalVideoPath)) fs.rmSync(finalVideoPath, { force: true }) } catch {}
 
     logger.info(`pipeline [${jobId}]: completed successfully`)
 
@@ -266,9 +304,7 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
     await markFailed(jobId, message)
 
     // Cleanup on failure
-    try {
-      if (recordingPath) fs.rmSync(path.dirname(recordingPath), { recursive: true, force: true })
-      if (fs.existsSync(voiceoverPath)) fs.rmSync(voiceoverPath, { force: true })
-    } catch { /* non-critical */ }
+    try { if (recordingPath) fs.rmSync(path.dirname(recordingPath), { recursive: true, force: true }) } catch {}
+    try { if (voiceoverPath && fs.existsSync(voiceoverPath)) fs.rmSync(voiceoverPath, { force: true }) } catch {}
   }
 }
