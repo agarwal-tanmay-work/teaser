@@ -279,65 +279,208 @@ async function findElement(
 }
 
 /**
- * Attempts to log in to a product using provided credentials.
+ * Common browser launch args (shared between login context and recording context).
  */
-async function attemptLogin(
-  page: Page,
-  credentials: { username: string; password: string }
-): Promise<void> {
+const BROWSER_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-web-security',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
+  '--disable-backgrounding-occluded-windows',
+  '--force-color-profile=srgb',
+  '--enable-smooth-scrolling',
+  '--font-render-hinting=none',
+]
+
+/**
+ * Performs login in a SEPARATE non-recording browser context, then saves the
+ * full session state (cookies + localStorage) to a JSON file.
+ *
+ * Key design choices:
+ * - Uses a headless browser with NO video recording so login is never captured.
+ * - Explicitly bypasses Google/SSO buttons: looks for "sign in with email" toggles
+ *   and clicks them to reveal the email/password form.
+ * - Uses locator.fill() (not keyboard.type) so credentials are entered reliably
+ *   even on autofill-protected inputs.
+ * - Returns the path to the saved state file, or null on failure.
+ */
+async function performLoginAndSaveState(
+  productUrl: string,
+  credentials: { username: string; password: string },
+  stateFilePath: string
+): Promise<boolean> {
+  logger.info('browserRecorder.login: starting login in non-recording context')
+  const browser = await chromium.launch({ headless: true, args: BROWSER_ARGS })
+
   try {
-    const usernameSelectors = [
+    const context = await browser.newContext({
+      viewport: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
+      userAgent: USER_AGENT,
+    })
+    const page = await context.newPage()
+
+    // ── Step 1: Find the login page ──
+    // Try to find a login link on the main page first, then fall back to common paths.
+    await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+
+    let loginUrl: string | null = null
+
+    // Look for a login/sign-in link in the nav
+    const loginLinkLocators = [
+      page.getByRole('link', { name: /^log.?in$/i }),
+      page.getByRole('link', { name: /^sign.?in$/i }),
+      page.getByRole('button', { name: /^log.?in$/i }),
+      page.getByRole('button', { name: /^sign.?in$/i }),
+    ]
+    for (const loc of loginLinkLocators) {
+      try {
+        await loc.first().waitFor({ state: 'visible', timeout: 2000 })
+        const href = await loc.first().getAttribute('href')
+        if (href) {
+          loginUrl = href.startsWith('http') ? href : new URL(href, productUrl).href
+          logger.info(`browserRecorder.login: found login link → ${loginUrl}`)
+          break
+        }
+      } catch { continue }
+    }
+
+    // If no login link found, try common paths
+    if (!loginUrl) {
+      const commonPaths = ['/login', '/signin', '/sign-in', '/auth/login', '/auth/signin', '/account/login', '/user/login']
+      for (const p of commonPaths) {
+        const url = new URL(p, productUrl).href
+        try {
+          const res = await page.goto(url, { waitUntil: 'networkidle', timeout: 8000 })
+          if (res?.ok()) {
+            loginUrl = url
+            logger.info(`browserRecorder.login: found login page at ${loginUrl}`)
+            break
+          }
+        } catch { continue }
+      }
+    }
+
+    if (loginUrl) {
+      await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {})
+    }
+
+    await page.waitForTimeout(1000)
+
+    // ── Step 2: Bypass Google/SSO — reveal email+password form ──
+    // Many sites default to "Continue with Google". Click "sign in with email" to
+    // get to the email/password form instead of triggering OAuth.
+    const emailTogglePhrases = [
+      /sign.?in with email/i,
+      /continue with email/i,
+      /log.?in with email/i,
+      /use email/i,
+      /use email.*password/i,
+      /email.*password/i,
+    ]
+    for (const phrase of emailTogglePhrases) {
+      try {
+        const toggle = page.getByRole('button', { name: phrase })
+          .or(page.getByRole('link', { name: phrase }))
+          .or(page.getByText(phrase, { exact: false }))
+        await toggle.first().waitFor({ state: 'visible', timeout: 2000 })
+        await toggle.first().click()
+        await page.waitForTimeout(1000)
+        logger.info(`browserRecorder.login: clicked email toggle`)
+        break
+      } catch { continue }
+    }
+
+    // ── Step 3: Fill email / username ──
+    const emailSelectors = [
       'input[type="email"]',
       'input[name="email"]',
+      'input[autocomplete="email"]',
+      'input[autocomplete="username"]',
       'input[name="username"]',
+      'input[placeholder*="email" i]',
+      'input[placeholder*="username" i]',
       'input[type="text"]',
     ]
 
-    let usernameField: ElementHandle | null = null
-    for (const selector of usernameSelectors) {
+    let emailFilled = false
+    for (const sel of emailSelectors) {
       try {
-        usernameField = await page.waitForSelector(selector, { state: 'visible', timeout: 3000 })
-        if (usernameField) break
-      } catch {
-        continue
-      }
+        const field = page.locator(sel).first()
+        await field.waitFor({ state: 'visible', timeout: 2000 })
+        await field.click()
+        await field.fill('')
+        await field.fill(credentials.username)
+        emailFilled = true
+        logger.info(`browserRecorder.login: filled email with selector "${sel}"`)
+        break
+      } catch { continue }
     }
 
-    if (!usernameField) {
-      logger.warn('browserRecorder.attemptLogin: no username field found, skipping login')
-      return
+    if (!emailFilled) {
+      logger.warn('browserRecorder.login: could not find email field — login skipped')
+      return false
     }
 
-    await usernameField.fill(credentials.username)
+    // Some sites show email and password on separate steps (e.g. click Next first)
+    // Try to click a "Next" / "Continue" button between the two fields
+    const nextButtonPatterns = [/^next$/i, /^continue$/i, /^proceed$/i]
+    for (const pattern of nextButtonPatterns) {
+      try {
+        const btn = page.getByRole('button', { name: pattern }).first()
+        await btn.waitFor({ state: 'visible', timeout: 1500 })
+        await btn.click()
+        await page.waitForTimeout(800)
+        logger.info('browserRecorder.login: clicked intermediate Next button')
+        break
+      } catch { continue }
+    }
 
-    const passwordField = await page.waitForSelector('input[type="password"]', {
-      state: 'visible',
-      timeout: 3000,
-    })
-    await passwordField.fill(credentials.password)
+    // ── Step 4: Fill password ──
+    try {
+      const passwordField = page.locator('input[type="password"]').first()
+      await passwordField.waitFor({ state: 'visible', timeout: 5000 })
+      await passwordField.click()
+      await passwordField.fill('')
+      await passwordField.fill(credentials.password)
+      logger.info('browserRecorder.login: filled password')
+    } catch {
+      logger.warn('browserRecorder.login: could not find password field — login skipped')
+      return false
+    }
 
-    const submitSelectors = [
-      'button[type="submit"]',
-      'input[type="submit"]',
-      'button:has-text("Log in")',
-      'button:has-text("Sign in")',
-      'button:has-text("Login")',
+    // ── Step 5: Submit ──
+    const submitLocators = [
+      page.locator('button[type="submit"]').first(),
+      page.getByRole('button', { name: /^log.?in$/i }).first(),
+      page.getByRole('button', { name: /^sign.?in$/i }).first(),
+      page.getByRole('button', { name: /^continue$/i }).first(),
+      page.getByRole('button', { name: /^submit$/i }).first(),
     ]
-
-    for (const selector of submitSelectors) {
+    for (const btn of submitLocators) {
       try {
-        const btn = await page.$(selector)
-        if (btn) {
-          await btn.click()
-          await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
-          break
-        }
-      } catch {
-        continue
-      }
+        await btn.waitFor({ state: 'visible', timeout: 2000 })
+        await btn.click()
+        logger.info('browserRecorder.login: submitted login form')
+        break
+      } catch { continue }
     }
-  } catch (error) {
-    logger.warn('browserRecorder.attemptLogin: login attempt failed, continuing without auth', { error })
+
+    // Wait for redirect after login
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
+    await page.waitForTimeout(2000)
+
+    // ── Step 6: Save session ──
+    await context.storageState({ path: stateFilePath })
+    logger.info(`browserRecorder.login: session saved → ${stateFilePath}`)
+    return true
+
+  } catch (err) {
+    logger.warn('browserRecorder.login: login failed', { error: err })
+    return false
+  } finally {
+    await browser.close()
   }
 }
 
@@ -498,16 +641,13 @@ async function executeStep(
 /**
  * Records a real product demo at 1080p HD.
  *
- * Uses `understanding.demo_flow` for browser interactions — this has reliable
- * action types (click/navigate/scroll) with visible button text generated by
- * `understandProduct()`. The `VideoScript` is used separately for narration
- * timing and captions in the assembler; it is NOT used to drive recording.
+ * When credentials are provided, login happens BEFORE recording starts in a
+ * separate non-recording browser context. The recording context receives the
+ * saved session state (cookies + localStorage) so it opens already logged in —
+ * login UI never appears in the video.
  *
- * Key behaviours:
- * - Dark overlay covers the initial page load — fades out in 0.4s once ready
- * - Animated custom cursor slides to each target and pulses on click
- * - Regex-based locators (partial, case-insensitive) find real-world CTAs
- *   regardless of surrounding text, icons, or CSS class names
+ * Uses `understanding.demo_flow` for interactions. VideoScript drives
+ * narration/captions only (in the assembler, not here).
  *
  * @returns Path to the recorded .webm video file
  */
@@ -522,26 +662,23 @@ export async function recordProduct(
 
   const clickEvents: ClickEvent[] = []
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      // Allow cross-origin iframe interactions
-      '--disable-web-security',
-      // Prevent Chrome throttling the headless tab
-      '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding',
-      '--disable-backgrounding-occluded-windows',
-      // Consistent colour profile
-      '--force-color-profile=srgb',
-      // Smooth scroll animations
-      '--enable-smooth-scrolling',
-      // High quality font rendering
-      '--font-render-hinting=none',
-    ],
-  })
+  // ── Step 0: Login in a separate non-recording context ──────────────────────
+  // This must happen BEFORE we create the recording context so the login screen
+  // is never captured in the video. We save the session to a file and load it
+  // into the recording context so it starts already authenticated.
+  let storageStatePath: string | undefined
+  if (credentials) {
+    const stateFile = path.join(outputDir, 'auth-state.json')
+    const ok = await performLoginAndSaveState(productUrl, credentials, stateFile)
+    if (ok) {
+      storageStatePath = stateFile
+      logger.info('browserRecorder: login succeeded — recording context will be pre-authenticated')
+    } else {
+      logger.warn('browserRecorder: login failed — recording without authentication')
+    }
+  }
+
+  const browser = await chromium.launch({ headless: true, args: BROWSER_ARGS })
 
   try {
     const context = await browser.newContext({
@@ -553,11 +690,11 @@ export async function recordProduct(
         size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
       },
       permissions: [],
+      // Pre-load the saved session — context opens as the logged-in user
+      ...(storageStatePath ? { storageState: storageStatePath } : {}),
     })
 
     // ─── Inject overlay script BEFORE any page loads ───
-    // This fires before page JS and immediately covers the white loading screen
-    // with a dark overlay matching our background colour (#080614).
     await context.addInitScript(INIT_OVERLAY_SCRIPT)
 
     const page = await context.newPage()
@@ -568,11 +705,9 @@ export async function recordProduct(
     await page.route('**/tracking**',            (route) => route.abort())
     await page.route('**/ads**',                 (route) => route.abort())
 
-    // ─── Navigate ───
+    // ─── Navigate to product (already logged in if credentials were provided) ─
     logger.info(`browserRecorder: navigating to ${productUrl}`)
     const response = await page.goto(productUrl, {
-      // 'networkidle' already waits for full network quiescence — no need for
-      // additional waitForLoadState calls after this.
       waitUntil: 'networkidle',
       timeout: 60000,
     })
@@ -580,25 +715,9 @@ export async function recordProduct(
       throw new Error(`Could not access the product URL. Status: ${response?.status() ?? 'unknown'}`)
     }
 
-    // Brief settle time for final JS renders; then immediately fade the overlay
-    // so the recording doesn't spend long on a dark screen.
     await page.waitForTimeout(800)
-
-    // Fade out the dark loading overlay — site is now fully rendered beneath it.
-    // Fade takes 0.4s; we wait 0.55s total before continuing.
     await fadeOutOverlay(page)
-
-    // Inject cursor and popup-hiding CSS
     await injectCustomCursor(page)
-
-    // Optional login
-    if (credentials) {
-      await attemptLogin(page, credentials)
-      await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {})
-      await page.waitForTimeout(800)
-      await fadeOutOverlay(page)
-      await injectCustomCursor(page)
-    }
 
     // Small pause before interactions so the site is visually stable
     await page.waitForTimeout(800)
@@ -606,11 +725,19 @@ export async function recordProduct(
     const recordingStartTime = Date.now()
 
     // ─── Execute Demo Flow ───
-    // Use understanding.demo_flow for recording — Gemini generates explicit
-    // action types (click/navigate/scroll) with visible button text here.
-    // VideoScript segments are used for narration/captions only (in assembler).
-    const demoSteps = understanding.demo_flow
-    logger.info(`browserRecorder: executing ${demoSteps.length} demo steps from understanding.demo_flow`)
+    // When credentials were supplied, filter out any login/auth steps from the
+    // demo_flow — we're already authenticated, no need to click login buttons.
+    const isAuthenticated = !!storageStatePath
+    const demoSteps = isAuthenticated
+      ? understanding.demo_flow.filter((step) => {
+          const combined = [step.description, step.navigate_to, step.element_to_click]
+            .join(' ')
+            .toLowerCase()
+          return !/(login|log in|sign in|signin|sign up|google|oauth|sso|auth|password|credential)/i.test(combined)
+        })
+      : understanding.demo_flow
+
+    logger.info(`browserRecorder: executing ${demoSteps.length} demo steps (authenticated: ${isAuthenticated})`)
     let stepIndex = 1
     for (const step of demoSteps) {
       logger.info(`browserRecorder: step ${stepIndex}/${demoSteps.length} — ${step.action}: ${step.description}`)
