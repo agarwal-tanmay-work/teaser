@@ -226,21 +226,40 @@ async function runPipeline(jobId: string, productUrl: string, opts: PipelineOpti
           : `Browser recording failed: ${msg}`
       )
     }
-    await updateProgress(jobId, 55, 'Demo recorded. Generating voiceover...')
+    await updateProgress(jobId, 55, 'Demo recorded. Preparing video...')
 
-    // ── Stage 4: Voiceover (55 → 70%) ─────────────────────────────────────
-    await updateProgress(jobId, 58, 'Converting script to natural voice...')
-    fs.mkdirSync(voiceoverDir, { recursive: true })
-    const fullScript = script.segments.map((s) => s.narration).join(' ')
-    try {
-      voiceoverPath = await generateVoiceover(fullScript, tone, voiceoverPath)
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
-      throw new Error(
-        `Voiceover generation failed: ${detail}`
-      )
+    // ── Stage 4: Voiceover — TEMPORARILY DISABLED (Gemini TTS quota exceeded) ──
+    // generateVoiceover() is disabled until quota is restored. A silent MP3 is
+    // written in its place so the assembler pipeline continues unchanged.
+    // To re-enable: uncomment the block below and remove the silent-audio block.
+    //
+    // await updateProgress(jobId, 58, 'Converting script to natural voice...')
+    // fs.mkdirSync(voiceoverDir, { recursive: true })
+    // const fullScript = script.segments.map((s) => s.narration).join(' ')
+    // try {
+    //   voiceoverPath = await generateVoiceover(fullScript, tone, voiceoverPath)
+    // } catch (err) {
+    //   const detail = err instanceof Error ? err.message : String(err)
+    //   throw new Error(`Voiceover generation failed: ${detail}`)
+    // }
+    //
+    // ── Temporary: generate 90s of silence as a stand-in voiceover ──────────
+    {
+      const { getFfmpegPath } = await import('@/workers/videoAssembler')
+      const { spawn } = await import('child_process')
+      fs.mkdirSync(voiceoverDir, { recursive: true })
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn(getFfmpegPath(), [
+          '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+          '-t', '90',
+          '-c:a', 'libmp3lame', '-b:a', '128k',
+          '-y', voiceoverPath,
+        ])
+        p.on('close', (code) => code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`)))
+        p.on('error', reject)
+      })
     }
-    await updateProgress(jobId, 70, 'Voiceover done. Editing the video...')
+    await updateProgress(jobId, 70, 'Assembling video...')
 
     // ── Stage 5: Assemble (70 → 90%) ──────────────────────────────────────
     await updateProgress(jobId, 73, 'Initializing video engine...')

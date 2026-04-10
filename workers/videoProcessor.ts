@@ -145,14 +145,33 @@ const worker = new Worker<VideoJobQueueData>(
         credentials
       )
 
-      await updateProgress(jobId, 55, 'Demo recorded. Generating your voiceover...')
+      await updateProgress(jobId, 55, 'Demo recorded. Preparing video...')
 
-      // ─── STAGE 4: Voiceover Generation (55 → 70%) ─────────────────────────
-      fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
-      const fullScript = script.segments.map((s) => s.narration).join(' ')
-      await generateVoiceover(fullScript, tone, voiceoverPath)
+      // ─── STAGE 4: Voiceover — TEMPORARILY DISABLED (Gemini TTS quota exceeded) ──
+      // To re-enable: uncomment the lines below and remove the silent-audio block.
+      //
+      // fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
+      // const fullScript = script.segments.map((s) => s.narration).join(' ')
+      // await generateVoiceover(fullScript, tone, voiceoverPath)
+      //
+      // ── Temporary: generate 90s of silence as stand-in voiceover ─────────
+      {
+        const { getFfmpegPath } = await import('./videoAssembler')
+        const { spawn } = await import('child_process')
+        fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
+        await new Promise<void>((resolve, reject) => {
+          const p = spawn(getFfmpegPath(), [
+            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+            '-t', '90',
+            '-c:a', 'libmp3lame', '-b:a', '128k',
+            '-y', voiceoverPath,
+          ])
+          p.on('close', (code) => code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`)))
+          p.on('error', reject)
+        })
+      }
 
-      await updateProgress(jobId, 70, 'Voiceover done. Editing your video...')
+      await updateProgress(jobId, 70, 'Editing your video...')
 
       // ─── STAGE 5: Video Assembly (70 → 90%) ───────────────────────────────
       const finalVideoPath = await assembleVideo({
