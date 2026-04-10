@@ -8,6 +8,7 @@ import type { ApiResponse, ProductUnderstanding } from '@/types'
 const UnderstandSchema = z.object({
   product_url: z.string().url(),
   description: z.string().optional(),
+  video_length: z.number().optional().default(60),
 })
 
 /**
@@ -30,7 +31,7 @@ export async function POST(
       )
     }
 
-    const { product_url, description } = parsed.data
+    const { product_url, description, video_length } = parsed.data
 
     let scrapedContent: string
     try {
@@ -49,7 +50,7 @@ export async function POST(
 
     let understanding: ProductUnderstanding
     try {
-      understanding = await understandProduct(product_url, scrapedContent, description)
+      understanding = await understandProduct(product_url, scrapedContent, description, video_length)
     } catch (error) {
       logger.error('videos/understand: Gemini analysis failed', { product_url, error })
       return NextResponse.json(

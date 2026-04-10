@@ -13,11 +13,15 @@ let _queue: Queue | null = null
  * Builds ioredis connection options from Upstash REST credentials.
  * Uses explicit host/port/password/tls to avoid URL-parsing edge cases.
  */
-function buildRedisConnection(): { host: string; port: number; password: string; tls: object } {
+function buildRedisConnection(): { host: string; port: number; password: string; tls: object; family: number } {
   const restUrl = process.env.UPSTASH_REDIS_REST_URL ?? ''
+  
+  // Upstash REST token is sometimes the base64-encoded DB properties, but if not we still attempt it
   const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? ''
   const host = restUrl ? new URL(restUrl).hostname : '127.0.0.1'
-  return { host, port: 6380, password: token, tls: {} }
+
+  // Upstash often requires explicit IPv4 and servername for direct TCP connections
+  return { host, port: 6379, password: token, tls: { servername: host }, family: 4 }
 }
 
 /**

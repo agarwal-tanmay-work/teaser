@@ -8,6 +8,8 @@ import path from 'path'
 import { createServiceClient } from '../lib/supabase'
 import { generateVoiceover } from '../lib/elevenlabs'
 import { logger } from '../lib/logger'
+import { crawlSite } from '../lib/firecrawl'
+import { understandProduct, generateScript } from '../lib/gemini'
 import { recordProduct } from './browserRecorder'
 import { assembleVideo } from './videoAssembler'
 import type {
@@ -20,7 +22,7 @@ import type {
 import type { VideoJobQueueData } from '../lib/queue'
 
 /** Upstash Redis connection derived from REST credentials (must run after dotenv.config). */
-function buildRedisConnection(): { host: string; port: number; password: string; tls: object } {
+function buildRedisConnection(): { host: string; port: number; password: string; tls: object; family: number } {
   const restUrl = process.env.UPSTASH_REDIS_REST_URL ?? ''
   const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? ''
   if (!restUrl || !token) {
@@ -29,8 +31,8 @@ function buildRedisConnection(): { host: string; port: number; password: string;
   // Parse port from URL (Upstash TLS uses 6380, not 6379)
   const parsed = restUrl ? new URL(restUrl) : null
   const host = parsed?.hostname ?? '127.0.0.1'
-  const port = parsed?.port ? parseInt(parsed.port, 10) : 6380
-  return { host, port, password: token, tls: {} }
+  // Upstash often requires explicit IPv4 and servername for direct TCP connections
+  return { host, port: 6379, password: token, tls: { servername: host }, family: 4 }
 }
 
 /** Shape of the data stored on each BullMQ job. */
@@ -62,26 +64,7 @@ async function updateProgress(
   }
 }
 
-/**
- * Fetches a URL and returns the parsed JSON response.
- * Throws with a descriptive message if the request or parse fails.
- */
-async function fetchInternal<T>(
-  url: string,
-  body: Record<string, unknown>
-): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) {
-    throw new Error(`Internal API call to ${url} failed with status ${res.status}`)
-  }
-  const data = (await res.json()) as ApiResponse<T>
-  if (!data.success) throw new Error(data.error)
-  return data.data
-}
+
 
 /**
  * BullMQ worker that processes video generation jobs end-to-end.
@@ -98,44 +81,42 @@ async function fetchInternal<T>(
  */
 const _redisConn = buildRedisConnection()
 
-const worker = new Worker<VideoJobQueueData>(
-  'video-generation',
-  async (job: Job<WorkerJobData>) => {
-    const { jobId, product_url, description, tone, video_length, credentials } = job.data
-    const supabase = createServiceClient()
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+export async function processJob(jobData: WorkerJobData) {
+  const { jobId, product_url, description, tone, video_length, credentials } = jobData
+  const supabase = createServiceClient()
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
-    const voiceoverPath = path.join(os.tmpdir(), 'teaser-voiceovers', `${jobId}.mp3`)
-    let recordingPath = ''
+  const voiceoverPath = path.join(os.tmpdir(), 'teaser-voiceovers', `${jobId}.mp3`)
+  let recordingPath = ''
+  let finalVideoPath = ''
 
-    try {
-      // ─── STAGE 1: Product Understanding (0 → 15%) ─────────────────────────
-      await updateProgress(jobId, 5, 'Reading your product...')
+  try {
+    // ─── STAGE 1: Product Understanding (0 → 15%) ─────────────────────────
+    await updateProgress(jobId, 5, 'Analyzing your product...')
 
-      const understanding = await fetchInternal<ProductUnderstanding>(
-        `${appUrl}/api/videos/understand`,
-        { product_url, description }
-      )
+    // Direct call instead of fetchInternal loop
+    const scrapedContent = await crawlSite(product_url, async (msg) => {
+      await updateProgress(jobId, 5, msg)
+    })
 
-      await supabase
-        .from('video_jobs')
-        .update({ product_understanding: understanding })
-        .eq('id', jobId)
+    const understanding = await understandProduct(product_url, scrapedContent, description, video_length)
 
-      await updateProgress(jobId, 15, 'Got it. Writing your script...')
+    await supabase
+      .from('video_jobs')
+      .update({ product_understanding: understanding })
+      .eq('id', jobId)
 
-      // ─── STAGE 2: Script Generation (15 → 35%) ────────────────────────────
-      const script = await fetchInternal<VideoScript>(
-        `${appUrl}/api/videos/script`,
-        { product_understanding: understanding, tone, video_length }
-      )
+    await updateProgress(jobId, 15, 'Got it. Writing your script...')
 
-      await supabase
-        .from('video_jobs')
-        .update({ script })
-        .eq('id', jobId)
+    // ─── STAGE 2: Script Generation (15 → 35%) ────────────────────────────
+    const script = await generateScript(understanding, tone, video_length)
 
-      await updateProgress(jobId, 35, 'Script ready. Opening your product in our browser...')
+    await supabase
+      .from('video_jobs')
+      .update({ script })
+      .eq('id', jobId)
+
+    await updateProgress(jobId, 35, 'Script ready. Opening your product in our browser...')
 
       // ─── STAGE 3: Browser Recording (35 → 55%) ────────────────────────────
       recordingPath = await recordProduct(
@@ -156,7 +137,7 @@ const worker = new Worker<VideoJobQueueData>(
       //
       // ── Temporary: generate 90s of silence as stand-in voiceover ─────────
       {
-        const { getFfmpegPath } = await import('./videoAssembler')
+        const { getFfmpegPath } = await import('../lib/ffmpegUtils')
         const { spawn } = await import('child_process')
         fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
         await new Promise<void>((resolve, reject) => {
@@ -173,15 +154,15 @@ const worker = new Worker<VideoJobQueueData>(
 
       await updateProgress(jobId, 70, 'Editing your video...')
 
-      // ─── STAGE 5: Video Assembly (70 → 90%) ───────────────────────────────
-      const finalVideoPath = await assembleVideo({
-        recordingPath,
-        voiceoverPath,
-        script,
-        understanding,
-        videoLength: video_length,
-        jobId,
-      })
+    // ─── STAGE 5: Video Assembly (70 → 90%) ───────────────────────────────
+    finalVideoPath = await assembleVideo({
+      recordingPath,
+      voiceoverPath,
+      script,
+      understanding,
+      videoLength: video_length,
+      jobId,
+    })
 
       await updateProgress(jobId, 90, 'Almost done. Uploading your video...')
 
@@ -215,7 +196,7 @@ const worker = new Worker<VideoJobQueueData>(
         .eq('id', jobId)
 
       // Cleanup all temp files
-      const recordingDir = `/tmp/recordings/${jobId}`
+      const recordingDir = path.join(os.tmpdir(), 'teaser-recordings', jobId)
       if (fs.existsSync(recordingDir)) {
         fs.rmSync(recordingDir, { recursive: true, force: true })
       }
@@ -228,9 +209,7 @@ const worker = new Worker<VideoJobQueueData>(
 
       logger.info(`videoProcessor: job ${jobId} completed successfully`)
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'An unexpected error occurred'
-
+      const message = error instanceof Error ? error.message : 'An unexpected error occurred'
       logger.error(`videoProcessor: job ${jobId} failed`, { error })
 
       await supabase
@@ -239,29 +218,41 @@ const worker = new Worker<VideoJobQueueData>(
         .eq('id', jobId)
 
       // Best-effort cleanup on failure
-      const recordingDir = `/tmp/recordings/${jobId}`
+      const recordingDir = path.join(os.tmpdir(), 'teaser-recordings', jobId)
       if (fs.existsSync(recordingDir)) {
         fs.rmSync(recordingDir, { recursive: true, force: true })
       }
       if (fs.existsSync(voiceoverPath)) {
         fs.rmSync(voiceoverPath, { force: true })
       }
+      if (finalVideoPath && fs.existsSync(finalVideoPath)) {
+        fs.rmSync(finalVideoPath, { force: true })
+      }
 
       throw error
     }
-  },
-  {
-    connection: _redisConn,
-    concurrency: 2,
+}
+
+// ── Background CLI Execution ──────────────────────────────────────────────────
+// This allows us to bypass BullMQ entirely and run jobs without Redis via spawn
+if (require.main === module) {
+  const jobPayload = process.env.JOB_PAYLOAD
+  if (jobPayload) {
+    logger.info('Teaser video processor running via CLI')
+    const jobData = JSON.parse(jobPayload) as WorkerJobData
+    processJob(jobData).then(() => process.exit(0)).catch((err) => {
+      logger.error('CLI Job failed', { error: err })
+      process.exit(1)
+    })
+  } else {
+    // If no JOB_PAYLOAD, run as BullMQ worker
+    const worker = new Worker<VideoJobQueueData>(
+      'video-generation',
+      async (job: Job<WorkerJobData>) => processJob(job.data),
+      { connection: _redisConn, concurrency: 2 }
+    )
+    worker.on('completed', (job) => logger.info(`videoProcessor: job ${job.id ?? 'unknown'} completed`))
+    worker.on('failed', (job, err) => logger.error(`videoProcessor: job ${job?.id ?? 'unknown'} failed`, { error: err.message }))
+    logger.info('Teaser video processor Worker started')
   }
-)
-
-worker.on('completed', (job: Job) => {
-  logger.info(`videoProcessor: job ${job.id ?? 'unknown'} completed`)
-})
-
-worker.on('failed', (job: Job | undefined, err: Error) => {
-  logger.error(`videoProcessor: job ${job?.id ?? 'unknown'} failed`, { error: err.message })
-})
-
-logger.info('Teaser video processor worker started')
+}

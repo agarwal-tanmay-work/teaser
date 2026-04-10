@@ -70,7 +70,8 @@ function extractJson(text: string): string {
 export async function understandProduct(
   productUrl: string,
   scrapedContent: string,
-  description?: string
+  description?: string,
+  videoLength: number = 60
 ): Promise<ProductUnderstanding> {
   const systemInstruction =
     'You are an expert product analyst. Analyze products and return ONLY valid JSON — no markdown, no code fences, no explanation.'
@@ -108,38 +109,62 @@ CRITICAL — navigate_to fields:
 - If you want to navigate somewhere, find its exact URL in the page list.
 
 ━━━ demo_flow REQUIREMENTS ━━━
-Generate 12–18 steps showing a complete product journey. The demo MUST:
-1. Start at the main product URL
-2. Scroll down slightly to reveal key features/sections above the fold
-3. Navigate to the most important product pages (features, pricing, dashboard, etc.)
-   using exact URLs from the PAGE list — do not stay on the landing page
-4. On each page: click meaningful elements (tabs, feature cards, interactive elements)
-5. Scroll to reveal important content on each page
-6. If there is a pricing page — navigate there and scroll through it
-7. If there is a features/product page — navigate there and interact with it
-8. End with a navigate back to the main URL or a final CTA
+You are scripting a PROFESSIONAL PRODUCT LAUNCH VIDEO, not a website tour.
+The viewer wants to see the product SOLVE A PROBLEM — not watch someone browse a website.
+
+Follow this exact structure (the "90-second rule"):
+
+PHASE 1 — HOOK (steps 1-2, ~5 seconds):
+  - Start at the main product URL
+  - Show the hero section for a maximum of 3 seconds
+  - ONE scroll_down to reveal a key benefit headline, then STOP scrolling
+
+PHASE 2 — PRODUCT REVEAL (steps 3-4, ~10 seconds):
+  - Navigate IMMEDIATELY to the actual product interface (dashboard, app, editor, workspace)
+  - If the product has an authenticated area, navigate to its main functional page
+  - Show the core interface loading — this is the "aha" moment
+
+PHASE 3 — KEY WORKFLOWS (steps 5-${videoLength <= 30 ? '4' : videoLength <= 60 ? '10' : '14'}, ~${videoLength - 20} seconds):
+  - Demonstrate 2-3 core workflows that show the product solving a real problem
+  - Click buttons, fill forms (type), open dropdowns, toggle features
+  - Each workflow: click → see result → brief wait → move to next
+  - This is the HEART of the video. Spend the most time here.
+
+PHASE 4 — CTA (steps ${videoLength <= 30 ? '5-6' : videoLength <= 60 ? '11-12' : '15-16'}, ~5 seconds):
+  - Navigate back to the landing page
+  - Hover or click the main CTA button ("Get Started", "Try Free", etc.)
+
+TOTAL: Generate exactly ${videoLength <= 30 ? '5–7' : videoLength <= 60 ? '10–14' : '14–18'} steps. No more, no less.
+
+ABSOLUTE RULES — NEVER VIOLATE:
+❌ NEVER generate steps for login, sign-in, sign-up, or authentication pages
+❌ NEVER generate steps that navigate to /login, /signin, /auth, /register paths
+❌ NEVER generate more than 2 scroll_down steps IN A ROW
+❌ NEVER generate more than 3 scroll_down steps TOTAL in the entire flow
+❌ NEVER generate steps to visit a pricing page (pricing is marketing, not product)
+❌ NEVER generate steps for cookie consent, popups, or notification dismissal
+❌ NEVER generate steps for settings, profile, or account management pages
+✅ ALWAYS spend 60%+ of steps inside the actual product interface
+✅ ALWAYS include at least 2 "click" actions on interactive product elements
+✅ ALWAYS include at least 1 "type" action if the product has any input field
+✅ ALWAYS use "wait" after every "navigate" step (page needs time to load)
 
 STEP GUIDELINES:
-- "click": buttons, links, tabs, cards, nav items, toggles (visible text only)
+- "click": buttons, tabs, cards, nav items, toggles, interactive elements (visible text only)
 - "navigate": to move to a different page — MUST use an exact URL from PAGE list
-- "scroll_down": reveal content below fold (use multiple in a row for long pages)
+- "scroll_down": reveal content below fold — USE SPARINGLY (max 3 total)
 - "scroll_up": return to top of page
 - "wait": after every navigate and after every major CTA click
 - "hover": for tooltips, dropdown menus, hover-reveal content
-- "type": for search inputs, forms — include type_text
+- "type": for search inputs, forms, text editors — include type_text with realistic demo data
 
 ELEMENT TARGETING (critical for automation):
 - element_to_click = the EXACT VISIBLE TEXT on the button or link
-  Examples: "Get Started", "View Pricing", "Start free trial", "Features"
+  Examples: "Get Started", "Create New", "Dashboard", "Add Item", "Submit"
 - NEVER use CSS class names, IDs, or HTML attributes — they WILL fail
 - Keep it SHORT (1–6 words) matching what the user actually sees on screen
 - For nav items: exact label shown in the nav bar
 - For inputs: the placeholder text shown inside the input field
-
-TIMING:
-- Add a "wait" immediately after EVERY "navigate" step
-- Add a "wait" after clicking any button that triggers a page load or modal
-- Total steps: aim for 14–18 for a rich demo experience
 
 Product URL: ${productUrl}
 User description: ${description ?? 'Not provided'}

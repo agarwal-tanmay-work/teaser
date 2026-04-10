@@ -310,68 +310,91 @@ async function showKeystroke(page: Page, text: string): Promise<void> {
   }
 }
 
-/**
- * Finds an element using Playwright's locator API with partial, case-insensitive
- * text matching — far more robust than CSS selectors for real-world CTA buttons
- * and navigation links.
- *
- * Strategy order (fastest→most generic):
- *   1. Role-based (button/link/menuitem/tab by accessible name)
- *   2. Text content (partial, case-insensitive)
- *   3. Form helpers (label, placeholder)
- *   4. CSS selector (only if selector looks like CSS)
- */
 async function findElement(
   page: Page,
   selector: string | undefined
-): Promise<ElementHandle | null> {
+): Promise<{ x: number, y: number } | null> {
   if (!selector) return null
 
-  // Escape regex special chars so "Get Started" doesn't break the pattern
+  // Inject a robust client-side fuzzy finder that ignores invisible elements 
+  // and returns the exact coordinates of the best visual match.
+  try {
+    const result = await page.evaluate(
+      (targetText: string): { x: number, y: number } | null => {
+        targetText = targetText.toLowerCase().trim()
+
+        const elements = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], [role="menuitem"], [role="tab"], input, select, textarea, label'))
+        let bestMatch: HTMLElement | null = null
+        let bestScore = -1
+
+        for (const el of elements as HTMLElement[]) {
+          const style = window.getComputedStyle(el)
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue
+          const rect = el.getBoundingClientRect()
+          if (rect.width === 0 || rect.height === 0 || rect.top < 0 || rect.left < 0) continue
+
+          const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').toLowerCase().trim()
+          if (!text) continue
+
+          if (text === targetText) {
+             bestMatch = el
+             bestScore = 1000 // Exact match bypass
+             break
+          }
+
+          if (text.includes(targetText) && targetText.length >= 2) {
+             const score = 100 - (text.length - targetText.length)
+             if (score > bestScore) {
+                 bestScore = score
+                 bestMatch = el
+             }
+          }
+        }
+
+        if (bestMatch && bestScore > 0) {
+           bestMatch.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' })
+           const rect = bestMatch.getBoundingClientRect()
+           return {
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2)
+           }
+        }
+        return null
+      },
+      selector
+    )
+
+    if (result) {
+       logger.info(`findElement: found "${selector}" via fuzzy DOM search at [${result.x}, ${result.y}]`)
+       await page.waitForTimeout(300) // allow scroll to settle
+       return result
+    }
+  } catch (e) {
+     logger.warn(`findElement: fuzzy DOM search error`, { e })
+  }
+
+  // Final fallback using rough Playwright locators mapped to coordinates
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(escaped, 'i')
-
-  // ── Group A: Playwright locator API ──
-  // These use the accessibility tree + DOM — partial, case-insensitive, robust.
   const locatorStrategies = [
     page.getByRole('button',   { name: re }),
     page.getByRole('link',     { name: re }),
-    page.getByRole('menuitem', { name: re }),
-    page.getByRole('tab',      { name: re }),
     page.locator('button',         { hasText: re }),
     page.locator('a',              { hasText: re }),
-    page.locator('[role="button"]', { hasText: re }),
-    page.locator('nav a',          { hasText: re }),
-    page.locator('li a',           { hasText: re }),
-    page.getByText(selector, { exact: false }),
-    page.getByLabel(selector,       { exact: false }),
-    page.getByPlaceholder(selector, { exact: false }),
+    page.getByText(selector, { exact: false })
   ]
 
   for (const locator of locatorStrategies) {
     try {
       const first = locator.first()
-      await first.waitFor({ state: 'visible', timeout: 2500 })
-      const handle = await first.elementHandle()
-      if (handle) {
-        logger.info(`findElement: found "${selector}" via locator`)
-        return handle
+      await first.waitFor({ state: 'visible', timeout: 800 })
+      const box = await first.boundingBox()
+      if (box) {
+         logger.info(`findElement: found "${selector}" via fallback locator`)
+         await first.scrollIntoViewIfNeeded()
+         return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
       }
-    } catch {
-      continue
-    }
-  }
-
-  // ── Group B: CSS selector fallback ──
-  // Only try if the selector string looks like a CSS selector.
-  if (/^[.#\[]|>|\s/.test(selector)) {
-    try {
-      const el = await page.waitForSelector(selector, { state: 'visible', timeout: 2000 })
-      if (el) {
-        logger.info(`findElement: found "${selector}" via CSS selector`)
-        return el
-      }
-    } catch { /* ignore */ }
+    } catch { continue }
   }
 
   logger.warn(`findElement: could not find "${selector}" with any strategy`)
@@ -632,12 +655,26 @@ async function executeStep(
         const targetUrl = step.navigate_to?.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to || '', productUrl).href
+        
+        // Skip navigation to auth-related URLs entirely
+        if (/(login|signin|sign-in|signup|sign-up|auth|register|oauth|sso)/i.test(targetUrl)) {
+          logger.warn(`browserRecorder: step ${stepIndex} — skipping navigation to auth URL: ${targetUrl}`)
+          break
+        }
+        
+        // FREEZE frames during navigation to prevent white/black flash
+        // The frame writer will keep repeating the last good frame
+        ;(page as any).__teaser_navigating__ = true
         await page.goto(targetUrl, {
           waitUntil: 'networkidle',
           timeout: 20000,
         }).catch(() => {})
-        await page.waitForTimeout(2000)
+        await page.waitForTimeout(1200)
+        await fadeOutOverlay(page)
         await injectCustomCursor(page)
+        // Wait for page to be visually stable before unfreezing
+        await page.waitForTimeout(500)
+        ;(page as any).__teaser_navigating__ = false
         break
       }
 
@@ -645,52 +682,15 @@ async function executeStep(
         if (!step.element_to_click) break
 
         try {
-          // Escape regex special chars so "Get Started" doesn't break the pattern
-          const escaped = step.element_to_click.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-          const re = new RegExp(escaped, 'i')
-
-          // Use regex-based matching for robustness — matches partial text case-insensitively
-          // so "Get Started" finds "Get Started Free →" etc.
-          const locators = [
-            page.getByRole('button',   { name: re }),
-            page.getByRole('link',     { name: re }),
-            page.getByRole('menuitem', { name: re }),
-            page.getByRole('tab',      { name: re }),
-            page.locator('button',          { hasText: re }),
-            page.locator('a',               { hasText: re }),
-            page.locator('[role="button"]',  { hasText: re }),
-            page.locator('nav a',           { hasText: re }),
-            page.locator('li a',            { hasText: re }),
-            page.getByText(step.element_to_click, { exact: false }),
-          ]
-
-          let clicked = false
-          for (const loc of locators) {
-            try {
-              const firstLocator = loc.first()
-              await firstLocator.waitFor({ state: 'visible', timeout: 2000 })
-
-              const box = await firstLocator.boundingBox()
-              if (box) {
-                const centerX = Math.round(box.x + box.width / 2)
-                const centerY = Math.round(box.y + box.height / 2)
-                clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'click' })
-                await moveCursorTo(page, centerX, centerY)
-                await firstLocator.scrollIntoViewIfNeeded()
-                await page.waitForTimeout(350)
-                await triggerClickAnimation(page, centerX, centerY)
-              }
-
-              await firstLocator.click({ timeout: 3000 })
-              clicked = true
-              logger.info(`browserRecorder: step ${stepIndex} — clicked "${step.element_to_click}"`)
-              break
-            } catch {
-              continue
-            }
-          }
-
-          if (!clicked) {
+          const target = await findElement(page, step.element_to_click)
+          if (target) {
+            clickEvents.push({ x: target.x, y: target.y, timestamp: elapsed, action: 'click' })
+            await moveCursorTo(page, target.x, target.y)
+            await page.waitForTimeout(350)
+            await triggerClickAnimation(page, target.x, target.y)
+            await page.mouse.click(target.x, target.y, { delay: 150 })
+            logger.info(`browserRecorder: step ${stepIndex} — clicked "${step.element_to_click}"`)
+          } else {
             logger.warn(`browserRecorder: step ${stepIndex} — could not find "${step.element_to_click}" to click`)
           }
 
@@ -705,37 +705,26 @@ async function executeStep(
       }
 
       case 'hover': {
-        const el = await findElement(page, step.element_to_click)
-        if (el) {
-          const box = await el.boundingBox()
-          if (box) {
-            const centerX = Math.round(box.x + box.width / 2)
-            const centerY = Math.round(box.y + box.height / 2)
-            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'hover' })
-            await moveCursorTo(page, centerX, centerY)
-            await el.scrollIntoViewIfNeeded()
-            await page.waitForTimeout(300)
-            await el.hover()
-            await page.waitForTimeout(2000)
-          }
+        const target = await findElement(page, step.element_to_click)
+        if (target) {
+          clickEvents.push({ x: target.x, y: target.y, timestamp: elapsed, action: 'hover' })
+          await moveCursorTo(page, target.x, target.y)
+          await page.waitForTimeout(300)
+          await page.mouse.move(target.x, target.y)
+          await page.waitForTimeout(2000)
         }
         break
       }
 
       case 'type': {
-        const el = await findElement(page, step.element_to_click)
-        if (el) {
-          const box = await el.boundingBox()
-          if (box) {
-            const centerX = Math.round(box.x + box.width / 2)
-            const centerY = Math.round(box.y + box.height / 2)
-            clickEvents.push({ x: centerX, y: centerY, timestamp: elapsed, action: 'type' })
-            await moveCursorTo(page, centerX, centerY)
-            await el.scrollIntoViewIfNeeded()
-            await page.waitForTimeout(300)
-            await triggerClickAnimation(page, centerX, centerY)
-            await el.click()
-          }
+        const target = await findElement(page, step.element_to_click)
+        if (target) {
+          clickEvents.push({ x: target.x, y: target.y, timestamp: elapsed, action: 'type' })
+          await moveCursorTo(page, target.x, target.y)
+          await page.waitForTimeout(300)
+          await triggerClickAnimation(page, target.x, target.y)
+          await page.mouse.click(target.x, target.y, { delay: 100 })
+          
           const textToType = step.type_text ?? 'hello'
           await showKeystroke(page, textToType)
           await page.keyboard.type(textToType, { delay: 75 })
@@ -804,10 +793,6 @@ export async function recordProduct(
       viewport: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
       userAgent: USER_AGENT,
       deviceScaleFactor: 1,
-      recordVideo: {
-        dir: outputDir,
-        size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
-      },
       permissions: [],
       // Pre-load the saved session — context opens as the logged-in user
       ...(storageStatePath ? { storageState: storageStatePath } : {}),
@@ -817,6 +802,46 @@ export async function recordProduct(
     await context.addInitScript(INIT_OVERLAY_SCRIPT)
 
     const page = await context.newPage()
+
+    // ─── Start CDP Screencast Capture (Decoupled Video) ───
+    const framesDir = path.join(outputDir, 'frames')
+    fs.mkdirSync(framesDir, { recursive: true })
+    
+    let isRecording = true
+    let isNavigating = false  // When true, freeze the last good frame (prevents white/black flash)
+    let lastFrameData: string | null = null
+    let frozenFrameData: string | null = null  // The last good frame before navigation
+    const client = await context.newCDPSession(page)
+    
+    client.on('Page.screencastFrame', (payload) => {
+      // During navigation, ignore new frames (they're often blank/white)
+      if (!isNavigating) {
+        lastFrameData = payload.data
+        frozenFrameData = payload.data  // Always keep the last known-good frame
+      }
+      client.send('Page.screencastFrameAck', { sessionId: payload.sessionId }).catch(() => {})
+    })
+    
+    // Start casting. quality: 85 is great for 1080p, everyNthFrame: 1 guarantees we see all CDP repaints
+    await client.send('Page.startScreencast', { format: 'jpeg', quality: 85, everyNthFrame: 1 })
+    
+    let frameCount = 0
+    const frameWriterLoop = async () => {
+       while (isRecording) {
+          // Use the frozen frame during navigation, or the live frame otherwise
+          const dataToWrite = isNavigating ? frozenFrameData : lastFrameData
+          if (dataToWrite) {
+             frameCount++
+             const framePath = path.join(framesDir, `frame_${frameCount.toString().padStart(5, '0')}.jpg`)
+             fs.writeFileSync(framePath, Buffer.from(dataToWrite, 'base64'))
+          }
+          // Pad loop to 30fps (33ms). This writes exactly 30 images a second.
+          await new Promise(r => setTimeout(r, 33)) 
+       }
+    }
+    
+    // Start writer passively
+    frameWriterLoop().catch(e => logger.error('frameWriter loop failed', { e }))
 
     // Block ads, trackers, large media that slow down rendering
     await page.route('**/*.{mp4,webm,ogg,avi}', (route) => route.abort())
@@ -844,29 +869,71 @@ export async function recordProduct(
     const recordingStartTime = Date.now()
 
     // ─── Execute Demo Flow ───
-    // When credentials were supplied, filter out any login/auth steps from the
-    // demo_flow — we're already authenticated, no need to click login buttons.
+    // ALWAYS filter out auth-related steps, regardless of whether credentials were provided.
+    // The Gemini prompt should never generate these, but this is a critical safety net.
     const isAuthenticated = !!storageStatePath
-    const demoSteps = isAuthenticated
-      ? understanding.demo_flow.filter((step) => {
-          const combined = [step.description, step.navigate_to, step.element_to_click]
-            .join(' ')
-            .toLowerCase()
-          return !/(login|log in|sign in|signin|sign up|google|oauth|sso|auth|password|credential)/i.test(combined)
-        })
-      : understanding.demo_flow
+    const AUTH_FILTER = /(login|log.?in|sign.?in|signin|sign.?up|signup|register|google|oauth|sso|auth|password|credential|forgot|reset.?password)/i
+    const demoSteps = understanding.demo_flow.filter((step) => {
+      const combined = [step.description, step.navigate_to, step.element_to_click, step.type_text]
+        .filter(Boolean)
+        .join(' ')
+      return !AUTH_FILTER.test(combined)
+    })
 
-    logger.info(`browserRecorder: executing ${demoSteps.length} demo steps (authenticated: ${isAuthenticated})`)
-    let stepIndex = 1
+    // Also enforce max 3 consecutive scroll_down steps
+    const filteredSteps: typeof demoSteps = []
+    let consecutiveScrolls = 0
+    let totalScrolls = 0
     for (const step of demoSteps) {
-      logger.info(`browserRecorder: step ${stepIndex}/${demoSteps.length} — ${step.action}: ${step.description}`)
+      if (step.action === 'scroll_down') {
+        consecutiveScrolls++
+        totalScrolls++
+        if (consecutiveScrolls > 2 || totalScrolls > 3) {
+          logger.info(`browserRecorder: skipping excess scroll_down step (consecutive=${consecutiveScrolls}, total=${totalScrolls})`)
+          continue
+        }
+      } else {
+        consecutiveScrolls = 0
+      }
+      filteredSteps.push(step)
+    }
+
+    // Hard duration cap: stop recording if it exceeds the max allowed time
+    const MAX_RECORDING_SECONDS = 120 // Never record more than 2 minutes of raw footage
+
+    logger.info(`browserRecorder: executing ${filteredSteps.length} demo steps (authenticated: ${isAuthenticated}, maxDuration: ${MAX_RECORDING_SECONDS}s)`)
+    let stepIndex = 1
+    for (const step of filteredSteps) {
+      // Check hard duration cap
+      const elapsedSeconds = (Date.now() - recordingStartTime) / 1000
+      if (elapsedSeconds > MAX_RECORDING_SECONDS) {
+        logger.warn(`browserRecorder: hit ${MAX_RECORDING_SECONDS}s hard cap at step ${stepIndex}, stopping early`)
+        break
+      }
+
+      // Propagate the isNavigating flag to the frame writer
+      if (step.action === 'navigate') {
+        isNavigating = true
+      }
+
+      logger.info(`browserRecorder: step ${stepIndex}/${filteredSteps.length} — ${step.action}: ${step.description}`)
       await executeStep(page, step, stepIndex, productUrl, clickEvents, recordingStartTime, scrollEvents)
-      await page.waitForTimeout(1200)
+      
+      // Unfreeze after navigation completes
+      if (step.action === 'navigate') {
+        isNavigating = false
+      }
+
+      await page.waitForTimeout(1000)
       stepIndex++
     }
 
     // Final pause to capture the last frame cleanly
-    await page.waitForTimeout(4000)
+    await page.waitForTimeout(3000)
+    
+    // Stop recording cleanly
+    isRecording = false
+    await client.send('Page.stopScreencast').catch(() => {})
     await context.close()
   } finally {
     await browser.close()
@@ -880,12 +947,15 @@ export async function recordProduct(
   fs.writeFileSync(scrollEventsPath, JSON.stringify(scrollEvents, null, 2), 'utf-8')
   logger.info(`browserRecorder: saved ${scrollEvents.length} scroll events to ${scrollEventsPath}`)
 
-  const files = fs.readdirSync(outputDir)
-  const videoFile = files.find((f) => f.endsWith('.webm'))
-
-  if (!videoFile) {
-    throw new Error('Playwright recording failed — no video file was created.')
+  const capturedFramesDir = path.join(outputDir, 'frames')
+  const files = fs.readdirSync(capturedFramesDir)
+  
+  if (files.length === 0) {
+    throw new Error('Playwright recording failed — no frames were captured.')
   }
+  
+  logger.info(`browserRecorder: successfully captured ${files.length} frames`)
 
-  return path.join(outputDir, videoFile)
+  // Return the path to the frames directory, NOT a single video file 
+  return path.join(outputDir, 'frames')
 }

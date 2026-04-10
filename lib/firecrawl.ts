@@ -170,7 +170,11 @@ async function mapSiteUrls(productUrl: string): Promise<string[]> {
  *
  * @returns Multi-page markdown content string
  */
-export async function crawlSite(productUrl: string): Promise<string> {
+export async function crawlSite(
+  productUrl: string,
+  onProgress?: (message: string) => Promise<void>
+): Promise<string> {
+  if (onProgress) await onProgress('Mapping website structure...')
   logger.info(`crawlSite: mapping ${productUrl}`)
 
   // Step 1: discover URLs
@@ -194,10 +198,15 @@ export async function crawlSite(productUrl: string): Promise<string> {
   logger.info(`crawlSite: scraping ${urlsToScrape.length} pages`, { urls: urlsToScrape })
 
   // Step 3: scrape all pages in parallel; don't let one failure block the rest
+  let completed = 0
   const results = await Promise.allSettled(
     urlsToScrape.map(async (url) => {
       try {
         const markdown = await scrapeUrl(url)
+        completed++
+        if (onProgress) {
+          await onProgress(`Reading content... (${completed}/${urlsToScrape.length} pages)`)
+        }
         return { url, content: markdown.slice(0, CHARS_PER_PAGE) }
       } catch (err) {
         logger.warn(`crawlSite: failed to scrape ${url}`, { error: err })

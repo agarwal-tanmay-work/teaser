@@ -13,9 +13,10 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@playwright/test": "^1.59.1",
-    "@remotion/bundler": "^4.0.446",
+    "@remotion/bundler": "^4.0.448",
     "@remotion/cli": "^4.0.446",
     "@remotion/player": "^4.0.446",
+    "@remotion/renderer": "^4.0.448",
     "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/ssr": "^0.10.0",
     "@supabase/supabase-js": "^2.101.1",
@@ -34,7 +35,7 @@
     "posthog-js": "^1.364.7",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "remotion": "^4.0.446",
+    "remotion": "^4.0.448",
     "tailwind-merge": "^3.5.0",
     "winston": "^3.19.0",
     "zod": "^4.3.6"
