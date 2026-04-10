@@ -28,6 +28,12 @@ export interface ClickEvent {
   action: string
 }
 
+/** Scroll-depth sample recorded during demo playback */
+export interface ScrollEvent {
+  timestamp: number
+  scrollPercent: number  // 0–1, fraction of page scrolled
+}
+
 /** Structured understanding of a product extracted by Gemini */
 export interface ProductUnderstanding {
   product_name: string

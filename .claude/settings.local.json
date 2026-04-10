@@ -33,7 +33,17 @@
       "Bash(kill 892)",
       "Bash(npx ts-node:*)",
       "Bash(pkill -f \"next dev\")",
-      "Bash(npx next:*)"
+      "Bash(npx next:*)",
+      "Bash(cmd /c \"pnpm dev\")",
+      "Bash(where node:*)",
+      "Read(//c/Users/priya/.local/share/**)",
+      "Read(//c/Users/priya/AppData/Local/pnpm/**)",
+      "Read(//c/Users/priya/**)",
+      "Bash(/c/Users/priya/AppData/Roaming/npm/pnpm type-check:*)",
+      "Bash(gh repo:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cmd:*)"
     ]
   }
 }

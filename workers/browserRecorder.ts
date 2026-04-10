@@ -3,7 +3,7 @@ import path from 'path'
 import os from 'os'
 import { chromium, type Page, type ElementHandle } from 'playwright'
 import { logger } from '../lib/logger'
-import type { ClickEvent, ProductUnderstanding, DemoStep } from '../types'
+import type { ClickEvent, ScrollEvent, ProductUnderstanding, DemoStep } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
 
@@ -78,6 +78,53 @@ const CUSTOM_CURSOR_CSS = `
     from { width: 0px; height: 0px; opacity: 0.85; }
     to   { width: 110px; height: 110px; opacity: 0; }
   }
+  .teaser-trail {
+    position: fixed !important;
+    border-radius: 50% !important;
+    background: rgba(99, 102, 241, 0.5) !important;
+    pointer-events: none !important;
+    z-index: 2147483644 !important;
+    transform: translate(-50%, -50%) !important;
+    animation: teaser-trail-anim 0.55s ease-out forwards !important;
+  }
+  @keyframes teaser-trail-anim {
+    0%   { width: 10px; height: 10px; opacity: 0.65; }
+    100% { width: 3px;  height: 3px;  opacity: 0; }
+  }
+`
+
+/**
+ * CSS for the keystroke HUD — a pill badge shown at the bottom of the screen
+ * whenever the recorder types text into a form field. Baked into the recording.
+ */
+const KEYSTROKE_HUD_CSS = `
+  #__teaser_kbd__ {
+    position: fixed !important;
+    bottom: 80px !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    background: rgba(0, 0, 0, 0.82) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    border-radius: 10px !important;
+    padding: 10px 24px !important;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace !important;
+    font-size: 22px !important;
+    color: #ffffff !important;
+    letter-spacing: 0.05em !important;
+    white-space: nowrap !important;
+    opacity: 0 !important;
+    transition: opacity 0.18s ease !important;
+    pointer-events: none !important;
+    z-index: 2147483645 !important;
+    backdrop-filter: blur(8px) !important;
+    -webkit-backdrop-filter: blur(8px) !important;
+    max-width: 900px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  #__teaser_kbd__.visible {
+    opacity: 1 !important;
+  }
 `
 
 /**
@@ -144,17 +191,22 @@ async function fadeOutOverlay(page: Page): Promise<void> {
 }
 
 /**
- * Injects the custom cursor element into the page.
+ * Injects the custom cursor and keystroke HUD elements into the page.
  * Idempotent — safe to call after every navigation.
  */
 async function injectCustomCursor(page: Page): Promise<void> {
   try {
-    await page.addStyleTag({ content: POPUP_HIDE_CSS + CUSTOM_CURSOR_CSS })
+    await page.addStyleTag({ content: POPUP_HIDE_CSS + CUSTOM_CURSOR_CSS + KEYSTROKE_HUD_CSS })
     await page.evaluate(() => {
       if (!document.getElementById('__teaser_cursor__')) {
         const cursor = document.createElement('div')
         cursor.id = '__teaser_cursor__'
         document.body.appendChild(cursor)
+      }
+      if (!document.getElementById('__teaser_kbd__')) {
+        const hud = document.createElement('div')
+        hud.id = '__teaser_kbd__'
+        document.body.appendChild(hud)
       }
     })
   } catch {
@@ -163,7 +215,8 @@ async function injectCustomCursor(page: Page): Promise<void> {
 }
 
 /**
- * Smoothly moves the custom cursor to the given page coordinates.
+ * Smoothly moves the custom cursor to the given page coordinates and
+ * spawns fading trail dots along the movement path for a motion-trail effect.
  * Waits 300ms for the CSS transition to play out in the recording.
  */
 async function moveCursorTo(page: Page, x: number, y: number): Promise<void> {
@@ -171,10 +224,32 @@ async function moveCursorTo(page: Page, x: number, y: number): Promise<void> {
     await page.evaluate(
       ({ px, py }: { px: number; py: number }) => {
         const cursor = document.getElementById('__teaser_cursor__') as HTMLElement | null
-        if (cursor) {
-          cursor.style.left = `${px}px`
-          cursor.style.top  = `${py}px`
+        if (!cursor) return
+
+        const prevLeft = parseFloat(cursor.style.left || '960')
+        const prevTop  = parseFloat(cursor.style.top  || '540')
+        const dx = px - prevLeft
+        const dy = py - prevTop
+        const dist = Math.sqrt(dx * dx + dy * dy)
+
+        // Spawn 3 trail dots at 25%, 50%, 75% of the path for long moves
+        if (dist > 60) {
+          for (let i = 1; i <= 3; i++) {
+            const tx = prevLeft + dx * (i / 4)
+            const ty = prevTop  + dy * (i / 4)
+            const dot = document.createElement('div')
+            dot.className = 'teaser-trail'
+            dot.style.left = `${tx}px`
+            dot.style.top  = `${ty}px`
+            dot.style.width  = `${10 - i * 2}px`
+            dot.style.height = `${10 - i * 2}px`
+            document.body.appendChild(dot)
+            setTimeout(() => dot.remove(), 350 + i * 60)
+          }
         }
+
+        cursor.style.left = `${px}px`
+        cursor.style.top  = `${py}px`
       },
       { px: x, py: y }
     )
@@ -205,6 +280,31 @@ async function triggerClickAnimation(page: Page, x: number, y: number): Promise<
       },
       { px: x, py: y }
     )
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * Shows the keystroke HUD with the given text, then auto-hides after 1.5s.
+ * Called before keyboard.type() so the text is visible during the recording.
+ */
+async function showKeystroke(page: Page, text: string): Promise<void> {
+  try {
+    await page.evaluate((txt: string) => {
+      const hud = document.getElementById('__teaser_kbd__') as HTMLElement | null
+      if (!hud) return
+      hud.textContent = txt
+      hud.classList.add('visible')
+      // Clear any pending hide timer
+      const prev = (hud as HTMLElement & { __teaser_hide__?: ReturnType<typeof setTimeout> }).__teaser_hide__
+      if (prev) clearTimeout(prev)
+      ;(hud as HTMLElement & { __teaser_hide__?: ReturnType<typeof setTimeout> }).__teaser_hide__ =
+        setTimeout(() => {
+          hud.classList.remove('visible')
+          setTimeout(() => { hud.textContent = '' }, 200)
+        }, 1500)
+    }, text)
   } catch {
     // Non-fatal
   }
@@ -487,6 +587,7 @@ async function performLoginAndSaveState(
 /**
  * Executes a single demo step action on the page.
  * Records click coordinates for post-processing zoom effects.
+ * Records scroll depth and navigation events for visual overlays.
  * Animates the custom cursor to each target before interacting.
  */
 async function executeStep(
@@ -495,24 +596,39 @@ async function executeStep(
   stepIndex: number,
   productUrl: string,
   clickEvents: ClickEvent[],
-  startTime: number
+  startTime: number,
+  scrollEvents: ScrollEvent[]
 ): Promise<void> {
   const elapsed = (Date.now() - startTime) / 1000
   const actionName = step.action
 
   try {
     switch (actionName) {
-      case 'scroll_down':
+      case 'scroll_down': {
         await page.evaluate(() => window.scrollBy({ top: 500, behavior: 'smooth' }))
         await page.waitForTimeout(1500)
+        const scrollPct = await page.evaluate(() => {
+          const h = document.documentElement.scrollHeight - window.innerHeight
+          return h > 0 ? Math.min(1, window.scrollY / h) : 0
+        }).catch(() => 0)
+        scrollEvents.push({ timestamp: elapsed, scrollPercent: scrollPct })
         break
+      }
 
-      case 'scroll_up':
+      case 'scroll_up': {
         await page.evaluate(() => window.scrollBy({ top: -500, behavior: 'smooth' }))
         await page.waitForTimeout(1500)
+        const scrollPct = await page.evaluate(() => {
+          const h = document.documentElement.scrollHeight - window.innerHeight
+          return h > 0 ? Math.min(1, window.scrollY / h) : 0
+        }).catch(() => 0)
+        scrollEvents.push({ timestamp: elapsed, scrollPercent: scrollPct })
         break
+      }
 
       case 'navigate': {
+        // Record the navigation timestamp before the page changes
+        clickEvents.push({ x: 0, y: 0, timestamp: elapsed, action: 'navigate' })
         const targetUrl = step.navigate_to?.startsWith('http')
           ? step.navigate_to
           : new URL(step.navigate_to || '', productUrl).href
@@ -620,7 +736,9 @@ async function executeStep(
             await triggerClickAnimation(page, centerX, centerY)
             await el.click()
           }
-          await page.keyboard.type(step.type_text ?? 'hello', { delay: 75 })
+          const textToType = step.type_text ?? 'hello'
+          await showKeystroke(page, textToType)
+          await page.keyboard.type(textToType, { delay: 75 })
           await page.waitForTimeout(1600)
         }
         break
@@ -660,7 +778,8 @@ export async function recordProduct(
   const outputDir = path.join(RECORDINGS_DIR, jobId)
   fs.mkdirSync(outputDir, { recursive: true })
 
-  const clickEvents: ClickEvent[] = []
+  const clickEvents: ClickEvent[]   = []
+  const scrollEvents: ScrollEvent[] = []
 
   // ── Step 0: Login in a separate non-recording context ──────────────────────
   // This must happen BEFORE we create the recording context so the login screen
@@ -741,7 +860,7 @@ export async function recordProduct(
     let stepIndex = 1
     for (const step of demoSteps) {
       logger.info(`browserRecorder: step ${stepIndex}/${demoSteps.length} — ${step.action}: ${step.description}`)
-      await executeStep(page, step, stepIndex, productUrl, clickEvents, recordingStartTime)
+      await executeStep(page, step, stepIndex, productUrl, clickEvents, recordingStartTime, scrollEvents)
       await page.waitForTimeout(1200)
       stepIndex++
     }
@@ -756,6 +875,10 @@ export async function recordProduct(
   const eventsPath = path.join(outputDir, 'click_events.json')
   fs.writeFileSync(eventsPath, JSON.stringify(clickEvents, null, 2), 'utf-8')
   logger.info(`browserRecorder: saved ${clickEvents.length} click events to ${eventsPath}`)
+
+  const scrollEventsPath = path.join(outputDir, 'scroll_events.json')
+  fs.writeFileSync(scrollEventsPath, JSON.stringify(scrollEvents, null, 2), 'utf-8')
+  logger.info(`browserRecorder: saved ${scrollEvents.length} scroll events to ${scrollEventsPath}`)
 
   const files = fs.readdirSync(outputDir)
   const videoFile = files.find((f) => f.endsWith('.webm'))

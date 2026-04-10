@@ -4,7 +4,7 @@ import os from 'os'
 import { spawn } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
 import { logger } from '../lib/logger'
-import type { VideoScript, ProductUnderstanding, VideoLength, ClickEvent } from '../types'
+import type { VideoScript, ProductUnderstanding, VideoLength, ClickEvent, ScrollEvent } from '../types'
 
 /** Output resolution: Full HD 1080p */
 const OUT_W = 1920
@@ -185,6 +185,22 @@ function loadClickEvents(recordingPath: string): ClickEvent[] {
 }
 
 /**
+ * Loads scroll-depth events from the sidecar JSON file created by browserRecorder.
+ */
+function loadScrollEvents(recordingPath: string): ScrollEvent[] {
+  try {
+    const eventsPath = path.join(path.dirname(recordingPath), 'scroll_events.json')
+    if (fs.existsSync(eventsPath)) {
+      const raw = fs.readFileSync(eventsPath, 'utf-8')
+      return JSON.parse(raw) as ScrollEvent[]
+    }
+  } catch (err) {
+    logger.warn('loadScrollEvents: failed to load scroll events', { error: err })
+  }
+  return []
+}
+
+/**
  * Creates a premium branded intro clip with gradient background and animated text.
  */
 async function createIntro(
@@ -261,16 +277,19 @@ async function createOutro(
 
 /**
  * Creates the framed composition: browser recording centered on a premium dark gradient
- * background, with a soft drop shadow beneath the browser window.
+ * background, with a soft drop shadow beneath the browser window and a macOS-style
+ * browser chrome bar (traffic lights + address bar) overlaid at the top.
  *
  * Pipeline:
  * 1. Generate a single-frame gradient background PNG
  * 2. Overlay the browser recording with a blurred shadow copy beneath it
+ * 3. Composite the macOS browser chrome (traffic lights + URL bar) on top
  */
 async function createFramedRecording(
   inputPath: string,
   outputPath: string,
-  workDir: string
+  workDir: string,
+  productUrl: string
 ): Promise<void> {
   const bgPath = path.join(workDir, 'gradient_bg.png')
 
@@ -290,6 +309,23 @@ async function createFramedRecording(
   const shadowOffsetX = PAD_X + 20   // 140
   const shadowOffsetY = PAD_Y + 24   // 92
 
+  // Build macOS browser chrome overlay filters
+  const chromeBarY = PAD_Y
+  const urlDisplay = escapeForFilterScript(productUrl.replace(/^https?:\/\//, '').slice(0, 72))
+
+  const chromeFilters = [
+    // Title bar background
+    `[framed]drawbox=x=${PAD_X}:y=${chromeBarY}:w=${BROWSER_W}:h=36:color=0x1c1c1c@1:t=fill[chrome_bar]`,
+    // Traffic lights — red, yellow, green
+    `[chrome_bar]drawbox=x=${PAD_X + 14}:y=${chromeBarY + 12}:w=12:h=12:color=0xFF5F57@1:t=fill[chrome_r]`,
+    `[chrome_r]drawbox=x=${PAD_X + 34}:y=${chromeBarY + 12}:w=12:h=12:color=0xFEBC2E@1:t=fill[chrome_y]`,
+    `[chrome_y]drawbox=x=${PAD_X + 54}:y=${chromeBarY + 12}:w=12:h=12:color=0x28C840@1:t=fill[chrome_g]`,
+    // Address bar background pill
+    `[chrome_g]drawbox=x=${PAD_X + 78}:y=${chromeBarY + 6}:w=${BROWSER_W - 100}:h=24:color=0x2e2e2e@0.95:t=fill[chrome_addr]`,
+    // URL text
+    `[chrome_addr]drawtext=text='${urlDisplay}':fontsize=13:fontcolor=0x888888:x=${PAD_X + 92}:y=${chromeBarY + 11}[chrome_out]`,
+  ].join(';')
+
   const filterGraph = [
     // Loop the gradient background PNG to match video duration
     `[1:v]loop=loop=-1:size=1:start=0,setpts=N/30/TB,scale=${OUT_W}:${OUT_H}[bg]`,
@@ -298,9 +334,10 @@ async function createFramedRecording(
     // Create shadow: split → blur → convert to YUVA so alpha works → set 50% opacity
     `[browser]split[b1][b2]`,
     `[b2]boxblur=luma_radius=28:luma_power=3,format=yuva420p,colorchannelmixer=aa=0.50[shadow]`,
-    // Compose: gradient → shadow (offset) → browser
+    // Compose: gradient → shadow (offset) → browser → chrome
     `[bg][shadow]overlay=${shadowOffsetX}:${shadowOffsetY}[bg_shadow]`,
     `[bg_shadow][b1]overlay=${PAD_X}:${PAD_Y}:shortest=1[framed]`,
+    chromeFilters,
   ].join(';')
 
   const filterPath = path.join(workDir, 'framing.txt')
@@ -310,7 +347,7 @@ async function createFramedRecording(
     '-i', inputPath,
     '-i', bgPath,
     '-filter_complex_script', filterPath,
-    '-map', '[framed]',
+    '-map', '[chrome_out]',
     '-c:v', 'libx264',
     '-crf', '16',
     '-preset', 'veryfast',
@@ -322,80 +359,131 @@ async function createFramedRecording(
 }
 
 /**
- * Builds a chained FFmpeg filter graph that applies smooth zoom-in effects
- * for every tracked click event. Zooms are deduplicated (min 3s spacing) and
- * capped at 6 total to keep the filter graph manageable.
+ * Applies smooth animated zoom to the framed recording using FFmpeg's zoompan filter.
+ * Zoom ramps in/out at 0.05 units per frame (≈0.2s at 30fps) to reach 1.3× magnification,
+ * centered on each click coordinate. Click events are deduplicated with a 3s gap, capped at 6.
  *
- * Each zoom: crop to 1.3× zoom area centered on click, scale back to full
- * resolution, overlay on the main video during the zoom window.
- *
- * @returns FFmpeg filter_complex lines (without trailing newline), or empty string if no zooms
+ * If there are no click events, the input file is copied unchanged.
  */
-function buildZoomFilterChain(
-  clickEvents: ClickEvent[],
-  introOffset: number,
-  inputLabel: string,
-  outputLabel: string
-): string {
-  // Only zoom on actual clicks (not hovers or type events)
+async function applyZoompan(
+  inputPath: string,
+  outputPath: string,
+  clickEvents: ClickEvent[]
+): Promise<void> {
   const clickOnly = clickEvents.filter((e) => e.action === 'click')
 
-  // Deduplicate: skip clicks within 3s of the previous zoom's end
   const validClicks: ClickEvent[] = []
-  let lastZoomEnd = -999
+  let lastEnd = -999
   for (const ev of clickOnly) {
-    const t = ev.timestamp + introOffset
-    if (t > lastZoomEnd + 0.5) {
+    if (ev.timestamp > lastEnd + 0.5) {
       validClicks.push(ev)
-      lastZoomEnd = t + 2.8
+      lastEnd = ev.timestamp + 2.8
     }
     if (validClicks.length >= 6) break
   }
 
-  if (validClicks.length === 0) return ''
-
-  const zoomFactor = 1.3
-  const cropW = Math.round(OUT_W / zoomFactor)   // ≈1477
-  const cropH = Math.round(OUT_H / zoomFactor)   // ≈831
-
-  const lines: string[] = []
-  let currentInput = inputLabel
-
-  for (let i = 0; i < validClicks.length; i++) {
-    const ev = validClicks[i]
-    const t = ev.timestamp + introOffset
-    const zPeak = (t + 0.4).toFixed(2)
-    const zEnd  = (t + 2.8).toFixed(2)
-
-    // Map click coordinates from browser viewport → composited 1920×1080 frame
-    const normX = ev.x / VIDEO_W_SOURCE
-    const normY = ev.y / VIDEO_H_SOURCE
-    const tgtX  = Math.round(PAD_X + normX * BROWSER_W)
-    const tgtY  = Math.round(PAD_Y + normY * BROWSER_H)
-
-    // Center crop on click, clamped to frame bounds
-    const cropX = Math.max(0, Math.min(Math.round(tgtX - cropW / 2), OUT_W - cropW))
-    const cropY = Math.max(0, Math.min(Math.round(tgtY - cropH / 2), OUT_H - cropH))
-
-    const mainLabel   = `[zm${i}_main]`
-    const cropLabel   = `[zm${i}_crop]`
-    const zoomedLabel = `[zm${i}_zoomed]`
-    const isLast      = i === validClicks.length - 1
-    const outLabel    = isLast ? outputLabel : `[zm${i}_out]`
-
-    lines.push(`${currentInput}split${mainLabel}${cropLabel}`)
-    lines.push(
-      `${cropLabel}crop=${cropW}:${cropH}:${cropX}:${cropY},` +
-      `scale=${OUT_W}:${OUT_H}:flags=lanczos${zoomedLabel}`
-    )
-    lines.push(
-      `${mainLabel}${zoomedLabel}overlay=0:0:enable='between(t,${zPeak},${zEnd})'${outLabel}`
-    )
-
-    currentInput = outLabel
+  if (validClicks.length === 0) {
+    fs.copyFileSync(inputPath, outputPath)
+    return
   }
 
-  return lines.join(';\n')
+  const ramp = 0.05  // zoom increment per frame; 0.3 / 0.05 = 6 frames ≈ 0.2s at 30fps
+
+  // z: ramp up inside each click window, ramp down outside all windows
+  let zExpr = `max(zoom-${ramp},1.0)`
+  for (const ev of [...validClicks].reverse()) {
+    const tIn  = ev.timestamp.toFixed(2)
+    const tOut = (ev.timestamp + 2.8).toFixed(2)
+    zExpr = `if(between(t,${tIn},${tOut}),min(zoom+${ramp},1.3),${zExpr})`
+  }
+
+  // x/y: center crop on click point during + 0.3s after window (for smooth zoom-out pan)
+  let xExpr = `iw/2-iw/zoom/2`
+  let yExpr = `ih/2-ih/zoom/2`
+  for (const ev of [...validClicks].reverse()) {
+    const tIn  = ev.timestamp.toFixed(2)
+    const tOut = (ev.timestamp + 3.1).toFixed(2)  // 0.3s extra for zoom-out pan
+    const tgtX = Math.round(PAD_X + (ev.x / VIDEO_W_SOURCE) * BROWSER_W)
+    const tgtY = Math.round(PAD_Y + (ev.y / VIDEO_H_SOURCE) * BROWSER_H)
+    xExpr = `if(between(t,${tIn},${tOut}),clip(${tgtX}-iw/zoom/2,0,iw-iw/zoom),${xExpr})`
+    yExpr = `if(between(t,${tIn},${tOut}),clip(${tgtY}-ih/zoom/2,0,ih-ih/zoom),${yExpr})`
+  }
+
+  const zoompanVf = `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':s=${OUT_W}x${OUT_H}:fps=30`
+
+  await runRawFfmpeg([
+    '-i', inputPath,
+    '-vf', zoompanVf,
+    '-c:v', 'libx264',
+    '-crf', '18',
+    '-preset', 'veryfast',
+    '-pix_fmt', 'yuv420p',
+    '-y',
+    outputPath,
+  ])
+}
+
+/** Result of building the click audio chain for FFmpeg. */
+interface ClickAudioChain {
+  /** Extra `-f lavfi -i sine=...` argument pairs to prepend to the final render command */
+  ffmpegInputArgs: string[]
+  /** filter_complex lines for trimming, fading, and delaying each click sound */
+  filterLines: string[]
+  /** Labels like [click_0], [click_1], ... for use in the amix expression */
+  outputLabels: string[]
+}
+
+/**
+ * Builds the FFmpeg inputs and filter lines to mix a short synthetic click
+ * sound at each click-event timestamp. The click sound is a 25ms sine burst
+ * at 800 Hz — no external file required.
+ *
+ * @param clickEvents  Full list of tracked events (only 'click' actions used)
+ * @param introOffset  Seconds the intro adds before the recording starts
+ * @returns            Inputs, filter lines, and labels ready for final amix
+ */
+function buildClickAudioChain(
+  clickEvents: ClickEvent[],
+  introOffset: number
+): ClickAudioChain {
+  const clickOnly = clickEvents.filter((e) => e.action === 'click')
+
+  // Same dedup logic as zoom: skip clicks within 3s of the previous one, max 6
+  const validClicks: ClickEvent[] = []
+  let lastEnd = -999
+  for (const ev of clickOnly) {
+    if (ev.timestamp > lastEnd + 0.5) {
+      validClicks.push(ev)
+      lastEnd = ev.timestamp + 2.8
+    }
+    if (validClicks.length >= 6) break
+  }
+
+  if (validClicks.length === 0) {
+    return { ffmpegInputArgs: [], filterLines: [], outputLabels: [] }
+  }
+
+  const ffmpegInputArgs: string[] = []
+  const filterLines: string[] = []
+  const outputLabels: string[] = []
+
+  for (let i = 0; i < validClicks.length; i++) {
+    const tMs = Math.round((validClicks[i].timestamp + introOffset) * 1000)
+    const label = `[click_${i}]`
+
+    // One lavfi sine source per click (FFmpeg requires separate inputs for adelay)
+    ffmpegInputArgs.push('-f', 'lavfi', '-i', 'sine=frequency=800:sample_rate=44100')
+
+    // Trim to 25ms, fade out the last 15ms, delay to timestamp, normalise volume
+    filterLines.push(
+      `[${i + 3}:a]atrim=0:0.025,afade=t=out:st=0.01:d=0.015,` +
+      `adelay=${tMs}|${tMs},volume=0.18${label}`
+    )
+
+    outputLabels.push(label)
+  }
+
+  return { ffmpegInputArgs, filterLines, outputLabels }
 }
 
 /**
@@ -420,6 +508,7 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
 
   const convertedPath    = path.join(workDir, 'recording.mp4')
   const framedPath       = path.join(workDir, 'framed.mp4')
+  const framedZoomedPath = path.join(workDir, 'framed_zoomed.mp4')
   const introPath        = path.join(workDir, 'intro.mp4')
   const outroPath        = path.join(workDir, 'outro.mp4')
   const concatListPath   = path.join(workDir, 'concat.txt')
@@ -427,8 +516,9 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
   const filterScriptPath = path.join(workDir, 'filter.txt')
   const finalPath        = path.join(RENDERED_DIR, `${jobId}.mp4`)
 
-  const clickEvents = loadClickEvents(recordingPath)
-  logger.info(`assembleVideo [${jobId}]: loaded ${clickEvents.length} click events`)
+  const clickEvents  = loadClickEvents(recordingPath)
+  const scrollEvents = loadScrollEvents(recordingPath)
+  logger.info(`assembleVideo [${jobId}]: loaded ${clickEvents.length} click / ${scrollEvents.length} scroll events`)
 
   try {
     // ═══════════════════════════════════════════════════════════════════════════
@@ -452,9 +542,16 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Step 2: Frame recording inside premium gradient background with shadow
+    //         + macOS browser chrome overlay
     // ═══════════════════════════════════════════════════════════════════════════
     logger.info(`assembleVideo [${jobId}]: creating framed composition`)
-    await createFramedRecording(convertedPath, framedPath, workDir)
+    await createFramedRecording(convertedPath, framedPath, workDir, options.understanding.key_pages_to_visit[0] ?? 'product demo')
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Step 2.5: Apply smooth animated zoom (zoompan) to the framed recording
+    // ═══════════════════════════════════════════════════════════════════════════
+    logger.info(`assembleVideo [${jobId}]: applying smooth zoom`)
+    await applyZoompan(framedPath, framedZoomedPath, clickEvents)
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Step 3: Create premium intro and outro
@@ -471,7 +568,7 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     logger.info(`assembleVideo [${jobId}]: concatenating segments`)
     const concatContent = [
       `file '${introPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`,
-      `file '${framedPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`,
+      `file '${framedZoomedPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`,
       `file '${outroPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`,
     ].join('\n')
     fs.writeFileSync(concatListPath, concatContent, 'utf-8')
@@ -487,74 +584,163 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     )
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 5: Build final filter graph (multi-click zoom + captions + audio)
+    // Step 5: Build final filter graph
+    //   Chain: nav blur → scroll bar → spotlight rings → lower-thirds → captions
+    //   Audio: voiceover + ambient chord + per-click sounds
     // ═══════════════════════════════════════════════════════════════════════════
     logger.info(`assembleVideo [${jobId}]: building final filter graph`)
 
-    const introOffset = 3 // Intro duration in seconds
+    const introOffset = 3 // intro duration in seconds
 
-    // ── Multi-click zoom chain ──
-    // buildZoomFilterChain returns lines already containing [0:v] as the first input,
-    // so we must NOT prepend [0:v] again when building videoFilterLines.
-    const zoomChainOutput = '[zoom_out]'
-    const zoomChain = buildZoomFilterChain(clickEvents, introOffset, '[0:v]', zoomChainOutput)
-    const hasZoom = zoomChain.length > 0
+    // Deduplicated click-only events (shared by spotlight + audio chain)
+    const clickOnly: ClickEvent[] = []
+    let lastClickEnd = -999
+    for (const ev of clickEvents.filter(e => e.action === 'click')) {
+      if (ev.timestamp > lastClickEnd + 0.5) {
+        clickOnly.push(ev)
+        lastClickEnd = ev.timestamp + 2.8
+      }
+      if (clickOnly.length >= 6) break
+    }
 
-    // ── Caption drawtext filters ──
+    // ── Video filter chain (sequential) ──
+    let videoFilterLines = ''
+    let curr = '[0:v]'
+
+    // 1. Navigation blur — brief 0.4s boxblur at each page-change
+    const navEvents = clickEvents.filter(e => e.action === 'navigate')
+    if (navEvents.length > 0) {
+      const enableParts = navEvents
+        .map(e => {
+          const t = e.timestamp + introOffset
+          return `between(t,${(t - 0.2).toFixed(2)},${(t + 0.2).toFixed(2)})`
+        })
+        .join('+')
+      videoFilterLines += `${curr}boxblur=luma_radius=5:luma_power=2:enable='gt(${enableParts},0)'[nav_b];\n`
+      curr = '[nav_b]'
+    }
+
+    // 2. Scroll progress bar — thin white bar on right edge of browser frame
+    if (scrollEvents.length > 0) {
+      const barX = PAD_X + BROWSER_W - 14
+      const barY = PAD_Y + 4
+      const maxH = BROWSER_H - 8
+
+      let hExpr = `${Math.round(scrollEvents[scrollEvents.length - 1].scrollPercent * maxH)}`
+      for (let i = scrollEvents.length - 2; i >= 0; i--) {
+        const s0 = scrollEvents[i]
+        const s1 = scrollEvents[i + 1]
+        const t0 = (s0.timestamp + introOffset).toFixed(2)
+        const t1 = (s1.timestamp + introOffset).toFixed(2)
+        const h0 = Math.round(s0.scrollPercent * maxH)
+        const h1 = Math.round(s1.scrollPercent * maxH)
+        const dt = (s1.timestamp - s0.timestamp).toFixed(3)
+        hExpr = `if(between(t,${t0},${t1}),${h0}+(${h1 - h0})*(t-${t0})/${dt},${hExpr})`
+      }
+      const firstT = (scrollEvents[0].timestamp + introOffset).toFixed(2)
+      hExpr = `if(lt(t,${firstT}),0,${hExpr})`
+
+      videoFilterLines += `${curr}drawbox=x=${barX}:y=${barY}:w=5:h='${hExpr}':color=white@0.55:t=fill[scroll_b];\n`
+      curr = '[scroll_b]'
+    }
+
+    // 3. Spotlight ring — indigo border around each click target for 1.5s
+    if (clickOnly.length > 0) {
+      const ringW = 120
+      const ringH = 72
+      let xExpr = `${-(ringW + 50)}`
+      let yExpr = `${-(ringH + 50)}`
+      for (const ev of [...clickOnly].reverse()) {
+        const t    = (ev.timestamp + introOffset).toFixed(2)
+        const tEnd = (ev.timestamp + introOffset + 1.5).toFixed(2)
+        const cx = Math.max(PAD_X, Math.min(
+          Math.round(PAD_X + (ev.x / VIDEO_W_SOURCE) * BROWSER_W) - ringW / 2,
+          PAD_X + BROWSER_W - ringW
+        ))
+        const cy = Math.max(PAD_Y + 40, Math.min(
+          Math.round(PAD_Y + (ev.y / VIDEO_H_SOURCE) * BROWSER_H) - ringH / 2,
+          PAD_Y + BROWSER_H - ringH
+        ))
+        xExpr = `if(between(t,${t},${tEnd}),${cx},${xExpr})`
+        yExpr = `if(between(t,${t},${tEnd}),${cy},${yExpr})`
+      }
+      videoFilterLines += `${curr}drawbox=x='${xExpr}':y='${yExpr}':w=${ringW}:h=${ringH}:color=0x6366F1@0.75:t=3[spot_b];\n`
+      curr = '[spot_b]'
+    }
+
+    // 4. Lower-third section labels — slide in from left, every other segment, max 8
+    const lowerThirds = script.segments
+      .filter((_, i) => i % 2 === 0)
+      .slice(0, 8)
+      .map((seg) => {
+        const label = seg.what_to_show.slice(0, 38).trim()
+        if (!label) return null
+        const escaped = escapeForFilterScript(label)
+        const tStart  = (seg.start_time + introOffset).toFixed(2)
+        const tEnd    = (seg.start_time + introOffset + 2.5).toFixed(2)
+        const destX   = PAD_X + 24
+        return (
+          `drawtext=text='${escaped}':fontsize=17:fontcolor=white:` +
+          `x='if(lt(t-${tStart},0.3),${destX}-120+120*(t-${tStart})/0.3,${destX})':` +
+          `y=${PAD_Y + BROWSER_H - 64}:` +
+          `box=1:boxcolor=black@0.72:boxborderw=10:` +
+          `alpha='if(lt(t-${tStart},0.2),(t-${tStart})/0.2,if(gt(t-${tStart},2.3),max(0,1-(t-${tStart}-2.3)/0.2),1))':` +
+          `enable='between(t,${tStart},${tEnd})'`
+        )
+      })
+      .filter((f): f is string => f !== null)
+
+    for (let i = 0; i < lowerThirds.length; i++) {
+      const outLabel = `[lt${i}]`
+      videoFilterLines += `${curr}${lowerThirds[i]}${outLabel};\n`
+      curr = outLabel
+    }
+
+    // 5. Captions — 0.15s fade-in per segment line (Feature 9: typewriter feel)
     const drawtextFilters = script.segments
       .flatMap((seg) => {
         const wrappedLines = wrapText(seg.narration)
         const start = (seg.start_time + introOffset).toFixed(2)
         const end   = (seg.end_time + introOffset).toFixed(2)
-
         return wrappedLines.map((line, i) => {
-          const text    = escapeForFilterScript(line)
-          const yPos = wrappedLines.length > 1 ? `h*0.85+${i*34}` : `h*0.85`
+          const text = escapeForFilterScript(line)
+          const yPos = wrappedLines.length > 1 ? `h*0.85+${i * 34}` : `h*0.85`
           return (
             `drawtext=text='${text}':fontsize=28:fontcolor=white:` +
             `borderw=2:bordercolor=black:box=0:` +
             `x=(w-text_w)/2:y=${yPos}:` +
+            `alpha='min(1,max(0,(t-${start})*8))':` +
             `enable='between(t,${start},${end})'`
           )
         })
       })
       .filter(Boolean)
 
-    // ── Compose the full video filter chain ──
-    let videoFilterLines = ''
-
-    if (hasZoom && drawtextFilters.length > 0) {
-      // Zoom chain already embeds [0:v] as its first input label
-      videoFilterLines = zoomChain + ';\n'
-      let currentInput = zoomChainOutput
-      for (let i = 0; i < drawtextFilters.length; i++) {
-        const isLast   = i === drawtextFilters.length - 1
-        const outLabel = isLast ? '[vout]' : `[v${i + 1}]`
-        videoFilterLines += `${currentInput}${drawtextFilters[i]}${outLabel};\n`
-        currentInput = outLabel
-      }
-    } else if (hasZoom) {
-      // Zoom only — output directly to [vout]
-      const chain = buildZoomFilterChain(clickEvents, introOffset, '[0:v]', '[vout]')
-      videoFilterLines = chain + ';\n'
-    } else if (drawtextFilters.length > 0) {
-      let currentInput = '[0:v]'
-      for (let i = 0; i < drawtextFilters.length; i++) {
-        const isLast   = i === drawtextFilters.length - 1
-        const outLabel = isLast ? '[vout]' : `[v${i + 1}]`
-        videoFilterLines += `${currentInput}${drawtextFilters[i]}${outLabel};\n`
-        currentInput = outLabel
-      }
-    } else {
-      videoFilterLines = `[0:v]null[vout];\n`
+    for (let i = 0; i < drawtextFilters.length; i++) {
+      const isLast   = i === drawtextFilters.length - 1
+      const outLabel = isLast ? '[vout]' : `[cap${i}]`
+      videoFilterLines += `${curr}${drawtextFilters[i]}${outLabel};\n`
+      curr = outLabel
     }
 
-    // ── Audio: mix voiceover + ambient background tone ──
+    // Ensure chain terminates at [vout]
+    if (curr !== '[vout]') {
+      videoFilterLines += `${curr}null[vout];\n`
+    }
+
+    // ── Audio: mix voiceover + ambient tone + per-click sound effects ──
+    const clickAudio = buildClickAudioChain(clickEvents, introOffset)
+    const clickFilterLines = clickAudio.filterLines.map((l) => l + ';').join('\n')
+    const clickLabels = clickAudio.outputLabels.join('')
+    const totalAudioInputs = 2 + clickAudio.outputLabels.length
+    const amixWeights = ['1', '1', ...clickAudio.outputLabels.map(() => '0.18')].join(' ')
+
     const audioFilterLines = [
       '[1:a]volume=-2dB[voice];',
       '[2:a]volume=-24dB[music];',
-      '[voice][music]amix=inputs=2:duration=first[aout]',
-    ].join('\n')
+      clickFilterLines,
+      `[voice][music]${clickLabels}amix=inputs=${totalAudioInputs}:duration=first:weights=${amixWeights}[aout]`,
+    ].filter(Boolean).join('\n')
 
     const filterScriptContent = [videoFilterLines, audioFilterLines].join('\n')
     fs.writeFileSync(filterScriptPath, filterScriptContent, 'utf-8')
@@ -567,7 +753,9 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     await runRawFfmpeg([
       '-i', concatPath,
       '-i', voiceoverPath,
-      '-f', 'lavfi', '-i', 'sine=frequency=432:sample_rate=44100',
+      // C-major ambient chord with slow tremolo — sounds like lo-fi background music
+      '-f', 'lavfi', '-i', 'aevalsrc=0.03*(sin(2*PI*t*261.6)+0.8*sin(2*PI*t*329.6)+0.7*sin(2*PI*t*392)+0.5*sin(2*PI*t*523.2))*(0.7+0.3*sin(2*PI*t*0.2)):s=44100',
+      ...clickAudio.ffmpegInputArgs,
       '-filter_complex_script', filterScriptPath,
       '-map', '[vout]',
       '-map', '[aout]',
