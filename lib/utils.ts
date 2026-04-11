@@ -26,7 +26,7 @@ export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   attempts: number = 5
 ): Promise<T> {
-  const delays = [0, 2000, 5000, 10000, 15000]
+  const delays = [0, 5000, 15000, 30000, 65000]
 
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {

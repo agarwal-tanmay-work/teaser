@@ -14,7 +14,18 @@ export const logger = winston.createLogger({
         winston.format.colorize(),
         winston.format.timestamp({ format: 'HH:mm:ss' }),
         winston.format.printf(({ timestamp, level, message, ...meta }) => {
-          const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : ''
+          // Handle Error objects in meta so they don't show as '{}'
+          const cleanMeta = { ...meta }
+          for (const key in cleanMeta) {
+            if (cleanMeta[key] instanceof Error) {
+              cleanMeta[key] = {
+                message: cleanMeta[key].message,
+                stack: cleanMeta[key].stack,
+                ...(cleanMeta[key] as any)
+              }
+            }
+          }
+          const metaStr = Object.keys(cleanMeta).length ? ` ${JSON.stringify(cleanMeta)}` : ''
           return `${String(timestamp)} [${level}] ${String(message)}${metaStr}`
         })
       )

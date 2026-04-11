@@ -15,9 +15,46 @@ export interface DemoStep {
   step: number
   action: DemoAction
   description: string
+  narration: string
   element_to_click?: string
   navigate_to?: string
   type_text?: string
+}
+
+/** Bounding box of a target element on page */
+export interface ElementBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** A specific timed segment to keep in the final video edit */
+export interface VideoClip {
+  start: number
+  end: number
+}
+
+/** A captured scene from the screenshot-based recorder */
+export interface SceneCapture {
+  step: number
+  action: DemoAction
+  description: string
+  narration: string
+  clips: VideoClip[]
+  targetElement: ElementBox | null
+  typeText: string | null
+  elementNotFound: boolean
+  pageUrl: string
+}
+
+/** Manifest output from the browser recorder */
+export interface RecordingManifest {
+  productUrl: string
+  productName: string
+  tagline: string
+  totalScenes: number
+  scenes: SceneCapture[]
 }
 
 /** Recorded click/interaction event for post-processing zoom effects */

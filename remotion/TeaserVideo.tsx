@@ -1,173 +1,30 @@
 import React from 'react';
 import {
   AbsoluteFill,
-  OffthreadVideo,
   Audio,
   Sequence,
   useCurrentFrame,
   useVideoConfig,
   interpolate,
+  OffthreadVideo,
 } from 'remotion';
 import { Intro } from './components/Intro';
 import { Outro } from './components/Outro';
-import { Cursor } from './components/Cursor';
-import { Subtitles } from './components/Subtitles';
-import { LowerThird } from './components/LowerThird';
-import { ScrollBar } from './components/ScrollBar';
 import { ProgressBar } from './components/ProgressBar';
-import { FeatureHighlight } from './components/FeatureHighlight';
-import type { ClickEvent } from '../types';
+import type { SceneCapture } from '../types';
 
 export interface TeaserVideoProps {
-  rawVideoUrl: string;
+  scenes: SceneCapture[];
+  recordedVideoUrl?: string;
   voiceoverUrl?: string;
-  clickEvents: ClickEvent[];
-  scrollEvents?: any[];
-  script?: any;
   productName: string;
   tagline: string;
+  productUrl: string;
 }
 
 const INTRO_SECONDS = 3;
 const OUTRO_SECONDS = 4;
 
-/**
- * DemoSection — the core recording playback with all overlays
- * Wrapped in its own <Sequence> so useCurrentFrame() is relative to demo start.
- */
-const DemoSection: React.FC<{
-  rawVideoUrl: string;
-  clickEvents: ClickEvent[];
-  scrollEvents?: any[];
-  script?: any;
-  productName: string;
-}> = ({ rawVideoUrl, clickEvents, scrollEvents, script, productName }) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  // ─── Camera Zoom on click events ───
-  let currentZoom = 1;
-  let originX = '50%';
-  let originY = '50%';
-
-  if (clickEvents && clickEvents.length > 0) {
-    const clickFrameWindow = fps * 2.8;
-    const rampIn = fps * 0.5;
-    const rampOut = fps * 0.6;
-
-    const activeZoomClick = clickEvents.find(e => {
-      if (e.action !== 'click') return false;
-      // Timestamps are relative to recording start, which aligns with demo sequence start
-      const tCenter = e.timestamp * fps;
-      return frame >= tCenter - rampIn && frame <= tCenter + clickFrameWindow;
-    });
-
-    if (activeZoomClick) {
-      const tCenter = activeZoomClick.timestamp * fps;
-      const tStart = tCenter - rampIn;
-      const tEnd = tCenter + clickFrameWindow;
-
-      currentZoom = interpolate(
-        frame,
-        [tStart, tCenter, tEnd - rampOut, tEnd],
-        [1, 1.25, 1.25, 1],
-        { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
-      );
-
-      originX = `${Math.max(15, Math.min(85, (activeZoomClick.x / 1920) * 100))}%`;
-      originY = `${Math.max(15, Math.min(85, (activeZoomClick.y / 1080) * 100))}%`;
-    }
-  }
-
-  return (
-    <AbsoluteFill>
-      {/* Deep navy gradient background */}
-      <AbsoluteFill
-        style={{
-          background: 'linear-gradient(135deg, #080614 0%, #0f0d24 50%, #171032 100%)',
-        }}
-      />
-
-      {/* Zoomable browser window wrapper */}
-      <AbsoluteFill
-        style={{
-          justifyContent: 'center',
-          alignItems: 'center',
-          transform: `scale(${currentZoom})`,
-          transformOrigin: `${originX} ${originY}`,
-        }}
-      >
-        <div
-          style={{
-            width: 1680,
-            height: 945,
-            backgroundColor: '#0a0a0a',
-            borderRadius: 16,
-            boxShadow: '0 40px 100px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05)',
-            overflow: 'hidden',
-            position: 'relative',
-            display: 'flex',
-            flexDirection: 'column',
-          }}
-        >
-          {/* macOS Chrome Header */}
-          <div style={{
-            height: 42,
-            backgroundColor: '#1c1c1c',
-            display: 'flex',
-            alignItems: 'center',
-            padding: '0 20px',
-            gap: 8,
-            borderBottom: '1px solid rgba(255,255,255,0.06)',
-          }}>
-            <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#FF5F57' }} />
-            <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#FEBC2E' }} />
-            <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#28C840' }} />
-            <div style={{
-              marginLeft: 60,
-              flex: 1,
-              maxWidth: 800,
-              height: 26,
-              backgroundColor: '#2e2e2e',
-              borderRadius: 6,
-              display: 'flex',
-              alignItems: 'center',
-              paddingLeft: 12,
-            }}>
-              <span style={{ color: '#888', fontSize: 13, fontFamily: 'system-ui' }}>
-                {productName.toLowerCase().replace(/\s+/g, '')}.com
-              </span>
-            </div>
-          </div>
-
-          {/* Video content */}
-          <div style={{ flex: 1, position: 'relative' }}>
-            {rawVideoUrl ? (
-              <OffthreadVideo
-                src={rawVideoUrl}
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              />
-            ) : null}
-            <ScrollBar scrollEvents={scrollEvents} />
-          </div>
-        </div>
-
-        {/* Animated Mouse Cursor */}
-        <Cursor clickEvents={clickEvents} />
-      </AbsoluteFill>
-
-      {/* Cinematic Overlays — these use script timestamps directly (no offset needed) */}
-      <FeatureHighlight script={script} />
-      <Subtitles script={script} />
-    </AbsoluteFill>
-  );
-};
-
-/**
- * TeaserVideo — main Remotion composition
- * Uses <Sequence> to structure the video into Intro → Demo → Outro
- * Each component gets its own timeline via useCurrentFrame() starting at 0.
- */
 export const TeaserVideo: React.FC<TeaserVideoProps> = (props) => {
   const { fps, durationInFrames } = useVideoConfig();
   const frame = useCurrentFrame();
@@ -176,7 +33,7 @@ export const TeaserVideo: React.FC<TeaserVideoProps> = (props) => {
   const outroFrames = OUTRO_SECONDS * fps;
   const demoFrames = durationInFrames - introFrames - outroFrames;
 
-  // Cross-fade: intro fades out over the first 0.5s of the demo
+  // Intro fade-out crossfade
   const crossFadeOut = interpolate(
     frame,
     [introFrames - fps * 0.3, introFrames + fps * 0.2],
@@ -186,35 +43,180 @@ export const TeaserVideo: React.FC<TeaserVideoProps> = (props) => {
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#080614' }}>
-      {/* ─── Demo Sequence (plays behind everything, slightly early for cross-fade) ─── */}
-      <Sequence from={Math.max(0, introFrames - fps * 0.3)} durationInFrames={demoFrames + fps * 0.3} layout="none">
-        <DemoSection
-          rawVideoUrl={props.rawVideoUrl}
-          clickEvents={props.clickEvents}
-          scrollEvents={props.scrollEvents}
-          script={props.script}
-          productName={props.productName}
-        />
+      
+      {/* ─── Recorded Demo Video ─── */}
+      <Sequence from={introFrames} durationInFrames={demoFrames} layout="none">
+        <AbsoluteFill style={{ justifyContent: 'center', alignItems: 'center' }}>
+          {/* Background behind the video window */}
+          <AbsoluteFill
+            style={{
+              background: 'radial-gradient(circle at center, #1b163a 0%, #080614 100%)',
+              zIndex: -1
+            }}
+          />
+
+          {props.recordedVideoUrl ? (
+            <div style={{
+              width: 1600,
+              height: 900,
+              borderRadius: 16,
+              boxShadow: '0 50px 120px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.08)',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+              backgroundColor: '#0a0a0a'
+            }}>
+              {/* macOS Chrome Header */}
+              <div style={{
+                height: 42,
+                backgroundColor: 'rgba(25, 25, 25, 0.95)',
+                backdropFilter: 'blur(10px)',
+                display: 'flex',
+                alignItems: 'center',
+                padding: '0 20px',
+                gap: 8,
+                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                flexShrink: 0,
+                zIndex: 10,
+              }}>
+                <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#FF5F57' }} />
+                <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#FEBC2E' }} />
+                <div style={{ width: 12, height: 12, borderRadius: '50%', backgroundColor: '#28C840' }} />
+                <div style={{
+                  marginLeft: 60,
+                  flex: 1,
+                  maxWidth: 800,
+                  height: 26,
+                  backgroundColor: 'rgba(0, 0, 0, 0.4)',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  borderRadius: 6,
+                  display: 'flex',
+                  alignItems: 'center',
+                  paddingLeft: 12,
+                }}>
+                  <span style={{ color: '#888', fontSize: 13, fontFamily: 'system-ui' }}>
+                    {props.productUrl ? new URL(props.productUrl).hostname : 'app.demo.io'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Sequentialized Jump-Cut Video Flow */}
+              <div style={{ flex: 1, position: 'relative', backgroundColor: '#000' }}>
+                {(() => {
+                  let cumulativeFrame = 0
+                  return props.scenes.flatMap((scene, sceneIdx) => {
+                    return scene.clips.map((clip, clipIdx) => {
+                      const clipDurFrames = Math.round(((clip.end - clip.start) / 1000) * fps)
+                      const startAt = cumulativeFrame
+                      cumulativeFrame += clipDurFrames
+                      
+                      return (
+                        <Sequence 
+                          key={`s${sceneIdx}c${clipIdx}`} 
+                          from={startAt} 
+                          durationInFrames={clipDurFrames}
+                          layout="none"
+                        >
+                          <OffthreadVideo 
+                            src={props.recordedVideoUrl!} 
+                            startFrom={Math.round((clip.start / 1000) * fps)}
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'cover'
+                            }}
+                          />
+                        </Sequence>
+                      )
+                    })
+                  })
+                })()}
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: 'white' }}>No video recorded.</div>
+          )}
+
+          {/* Subtitles Overlay mapped to merged clips */}
+          {(() => {
+            let cumulativeFrame = 0
+            return props.scenes.map((scene, i) => {
+              const sceneDurFrames = scene.clips.reduce((acc, clip) => 
+                acc + Math.round(((clip.end - clip.start) / 1000) * fps), 0
+              )
+              const startAt = cumulativeFrame
+              cumulativeFrame += sceneDurFrames
+              
+              return (
+                <Sequence key={i} from={startAt} durationInFrames={sceneDurFrames} layout="none">
+                  {scene.narration && (
+                    <AbsoluteFill
+                      style={{
+                        justifyContent: 'flex-end',
+                        alignItems: 'center',
+                        paddingBottom: 60,
+                        pointerEvents: 'none',
+                        zIndex: 9999,
+                        opacity: interpolate(
+                          frame - (introFrames + startAt), 
+                          [0, 10, sceneDurFrames - 10, sceneDurFrames], 
+                          [0, 1, 1, 0], 
+                          { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
+                        )
+                      }}
+                    >
+                      <div
+                        style={{
+                          backgroundColor: 'rgba(10, 10, 15, 0.75)',
+                          padding: '16px 36px',
+                          borderRadius: 14,
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
+                          backdropFilter: 'blur(16px)',
+                          maxWidth: 1200,
+                        }}
+                      >
+                        <p style={{
+                          color: '#f8f8f8',
+                          margin: 0,
+                          fontSize: 28,
+                          fontFamily: 'system-ui',
+                          fontWeight: 500,
+                          lineHeight: 1.4,
+                          textAlign: 'center',
+                          letterSpacing: '0.01em',
+                          textShadow: '0 2px 8px rgba(0,0,0,0.6)'
+                        }}>
+                          {scene.narration}
+                        </p>
+                      </div>
+                    </AbsoluteFill>
+                  )}
+                </Sequence>
+              )
+            })
+          })()}
+        </AbsoluteFill>
       </Sequence>
 
-      {/* ─── Intro Sequence (overlays on top, fades out to reveal demo) ─── */}
+      {/* ─── Intro (overlays on top, fades out to reveal video) ─── */}
       {crossFadeOut > 0 && (
-        <Sequence from={0} durationInFrames={introFrames + fps * 0.3} layout="none">
+        <Sequence from={0} durationInFrames={introFrames + Math.round(fps * 0.3)} layout="none">
           <AbsoluteFill style={{ opacity: crossFadeOut }}>
             <Intro productName={props.productName} tagline={props.tagline} />
           </AbsoluteFill>
         </Sequence>
       )}
 
-      {/* ─── Outro Sequence ─── */}
+      {/* ─── Outro ─── */}
       <Sequence from={durationInFrames - outroFrames} durationInFrames={outroFrames} layout="none">
-        <Outro productName={props.productName} />
+        <Outro productName={props.productName} productUrl={props.productUrl} />
       </Sequence>
 
-      {/* ─── Progress Bar (spans entire video) ─── */}
+      {/* ─── Progress Bar (spans full video) ─── */}
       <ProgressBar />
 
-      {/* ─── Audio (spans entire video) ─── */}
+      {/* ─── Audio ─── */}
       {props.voiceoverUrl && <Audio src={props.voiceoverUrl} />}
     </AbsoluteFill>
   );

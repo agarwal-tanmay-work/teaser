@@ -224,10 +224,14 @@ export async function crawlSite(
   }
 
   if (pages.length === 0) {
-    throw new Error('Could not retrieve any content from this product URL.')
+    if (onProgress) await onProgress('Could not retrieve any content. Retrying main URL...')
+    logger.warn('crawlSite: no pages scraped successfully, attempting main URL fallback')
+    const mainMarkdown = await scrapeUrl(mainUrl)
+    return `### PAGE: ${mainUrl}\n\n${mainMarkdown}`
   }
 
   logger.info(`crawlSite: successfully scraped ${pages.length}/${urlsToScrape.length} pages`)
+  if (onProgress) await onProgress(`Successfully read ${pages.length} pages. Finalizing analysis...`)
 
   const combined = pages
     .map(({ url, content }) => `### PAGE: ${url}\n\n${content}`)

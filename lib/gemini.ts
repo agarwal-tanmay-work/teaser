@@ -1,20 +1,16 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength } from '@/types'
+import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment } from '@/types'
 import { retryWithBackoff } from '@/lib/utils'
 import { logger } from '@/lib/logger'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
 
-/**
- * Ordered list of models to try. If the first model fails (e.g. 503 overload),
- * the next one is attempted automatically.
- */
-const MODEL_CHAIN = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+const MODEL_CHAIN = ['gemini-2.5-flash', 'gemini-2.0-flash']
 
-/**
- * Tries to generate content using the model fallback chain.
- * Each model gets full retry-with-backoff treatment before moving on.
- */
+function getModel(modelName: string) {
+  return genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1beta' })
+}
+
 async function generateWithFallback(
   systemInstruction: string,
   prompt: string
@@ -25,240 +21,366 @@ async function generateWithFallback(
     try {
       logger.info(`gemini: trying model ${modelName}`)
       const result = await retryWithBackoff(async () => {
-        const model = genAI.getGenerativeModel({ model: modelName, systemInstruction })
-        const res = await model.generateContent(prompt)
+        const model = getModel(modelName)
+        const res = await model.generateContent({
+          systemInstruction,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }]
+        })
         return res.response.text().trim()
       })
       return result
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      logger.warn(`gemini: model ${modelName} failed, trying next fallback`, {
-        error: lastError.message,
-      })
+      logger.warn(`gemini: model ${modelName} failed`, { error: lastError.message })
     }
   }
-
   throw lastError ?? new Error('All Gemini models failed')
 }
 
-/**
- * Extracts a JSON string from a text block, even if it contains Conversational
- * leading/trailing text or markdown fences.
- */
 function extractJson(text: string): string {
-  // If no JSON-like content found, return as-is (JSON.parse will catch it)
+  // Try to find JSON inside code fences first
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/)
+  if (fenceMatch) return fenceMatch[1].trim()
+
   if (!text.includes('{')) return text
-
-  // 1. Try to find content between triple backticks
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i
-  const match = text.match(codeBlockRegex)
-  if (match?.[1]) return match[1].trim()
-
-  // 2. Fallback: Find the first '{' and last '}'
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start !== -1 && end !== -1 && end > start) {
     return text.slice(start, end + 1).trim()
   }
-
   return text.trim()
 }
 
+// ─── SYSTEM PROMPT: Product Understanding + Demo Flow ────────────────────────
+
+const UNDERSTAND_SYSTEM_PROMPT = `You are an expert product analyst and demo video director. Your job is to analyze a product website and create a comprehensive product understanding plus an interactive demo flow that will be used to record a professional startup demo video.
+
+CRITICAL RULES:
+1. You MUST return valid JSON matching the exact schema below. No extra text.
+2. For element_to_click: use the EXACT visible button/link text as it appears on the page (e.g. "Get Started", "Sign Up Free", "View Pricing"). NEVER use CSS selectors, class names, or IDs.
+3. Generate 10-20 demo steps that showcase the product's key features and pages.
+4. Ensure a continuous natural flow. Heavily prefer using "click" actions to navigate between pages. Use "navigate" primarily for the very first step.
+5. ALWAYS visit at least 2 different pages (e.g. features page, pricing page) by clicking relevant links.
+6. The narration for each step must describe what the viewer is SEEING on screen at that moment. Reference the product by its actual name.
+7. NEVER include steps that navigate to login, signup, register, or auth pages.
+8. NEVER include steps that scroll more than 3 times consecutively.
+9. For "type" actions, use realistic example text that demonstrates the product (e.g. if it's a search bar, type a realistic query).
+10. Follow this narrative arc:
+    - Steps 1-2: Hook — show the landing page, introduce the problem the product solves
+    - Steps 3-5: Introduction — navigate to features/product page, show core value
+    - Steps 6-12: Feature demos — click through 3-5 key features, type in fields, hover over elements
+    - Steps 13-15+: Closing — show pricing/testimonials, end with CTA
+
+OUTPUT SCHEMA:
+{
+  "product_name": "string — the actual product name",
+  "tagline": "string — the product's tagline or one-line description",
+  "core_value_prop": "string — what makes this product uniquely valuable",
+  "target_audience": "string — who this product is for",
+  "top_5_features": ["feature1", "feature2", "feature3", "feature4", "feature5"],
+  "brand_tone": "string — professional/playful/technical/friendly",
+  "product_category": "string — e.g. project management, analytics, design tool",
+  "problem_being_solved": "string — the pain point this product addresses",
+  "key_pages_to_visit": ["url1", "url2"] — full URLs of important pages found on the site,
+  "demo_flow": [
+    {
+      "step": 1,
+      "action": "navigate",
+      "description": "Open the landing page",
+      "narration": "Meet ProductName — the easiest way to solve X.",
+      "navigate_to": "https://example.com"
+    },
+    {
+      "step": 2,
+      "action": "scroll_down",
+      "description": "Scroll to see the hero section features",
+      "narration": "Right from the homepage, you can see how ProductName transforms your workflow."
+    },
+    {
+      "step": 3,
+      "action": "click",
+      "description": "Click on Features in the navigation",
+      "narration": "Let's dive into what makes ProductName powerful.",
+      "element_to_click": "Features"
+    },
+    {
+      "step": 4,
+      "action": "type",
+      "description": "Type a search query in the search bar",
+      "narration": "Watch how fast ProductName finds exactly what you need.",
+      "element_to_click": "Search",
+      "type_text": "quarterly revenue report"
+    }
+  ]
+}
+
+ALLOWED ACTIONS:
+- "navigate": Go to a URL. Requires "navigate_to" (full URL or relative path).
+- "click": Click a button/link. Requires "element_to_click" (exact visible text on the button).
+- "type": Click a field and type text. Requires "element_to_click" (field label/placeholder) + "type_text".
+- "hover": Hover over an element. Requires "element_to_click".
+- "scroll_down": Scroll the page down smoothly.
+- "scroll_up": Scroll the page up smoothly.
+- "wait": Pause for 3 seconds (use sparingly, only to let the viewer absorb what's on screen).`
+
+// ─── SYSTEM PROMPT: Video Script Generation ──────────────────────────────────
+
+const SCRIPT_SYSTEM_PROMPT = `You are a professional video script writer for SaaS startup demo videos. Given a product understanding with its demo flow, generate a timed video script.
+
+CRITICAL RULES:
+1. Return valid JSON matching the exact schema below. No extra text.
+2. Each segment corresponds to one demo step. The number of segments MUST match the number of demo_flow steps.
+3. Each segment's narration should describe what the viewer sees on screen at that moment.
+4. Reference the product by its actual name — never say "this product" or "the tool".
+5. Use the narration from the demo_flow steps as a strong starting point, but make them flow together as a cohesive script.
+6. Timing: allocate 3-6 seconds per step. Click/type steps get 4-5s. Navigate steps get 5-6s. Scroll/wait get 3-4s.
+7. Follow this narrative arc:
+   - Opening (first 2 segments): Hook the viewer with the problem, introduce the product
+   - Middle (3-8 segments): Demonstrate key features with specific, compelling narration
+   - Closing (last 2 segments): Social proof, call to action
+
+OUTPUT SCHEMA:
+{
+  "total_duration": 60,
+  "segments": [
+    {
+      "start_time": 0,
+      "end_time": 5,
+      "narration": "What the voiceover says during this segment",
+      "what_to_show": "Brief description of what's visible on screen"
+    }
+  ]
+}
+
+// ─── SYSTEM PROMPT: Dynamic Page Analysis ────────────────────────────────────
+
+const ANALYZE_PAGE_SYSTEM_PROMPT = `You are a real-time web interaction auditor. Your job is to analyze the current state of a web page (after a navigation or action) and determine where the target elements for the next demo steps are located.
+
+CRITICAL RULES:
+1. You MUST return valid JSON.
+2. Analyze the provided "PAGE SNAPSHOT" (which is a simplified representation of the DOM).
+3. Identify the EXACT visible text of buttons, links, or fields that correspond to the requested interactive goals.
+4. If the page doesn't look like what was expected, provide a "correction" field.
+
+OUTPUT SCHEMA:
+{
+  "page_context": "string — brief description of what page we are on (e.g. 'Dashboard', 'Settings')",
+  "is_target_ready": boolean,
+  "corrections": [
+    {
+       "step_index": number,
+       "new_element_text": "string — the actual text found on page",
+       "explanation": "string — why this correction was made"
+    }
+  ],
+  "suggested_actions": ["array of strings — fallback actions if the plan is stuck"]
+}`
+
+// ─── Repair Functions ────────────────────────────────────────────────────────
+
+function repairDemoStep(s: any, i: number, productUrl: string): DemoStep {
+  if (typeof s === 'string') {
+    return {
+      step: i + 1,
+      action: i === 0 ? 'navigate' : 'wait',
+      description: s,
+      narration: s,
+      navigate_to: i === 0 ? productUrl : undefined
+    }
+  }
+  return {
+    step: s.step ?? i + 1,
+    action: s.action || (i === 0 ? 'navigate' : 'wait'),
+    description: s.description || s.text || 'Continue walkthrough',
+    narration: s.narration || s.description || 'Exploring the product.',
+    element_to_click: s.element_to_click || s.target || undefined,
+    navigate_to: s.navigate_to || (i === 0 ? productUrl : undefined),
+    type_text: s.type_text || undefined
+  }
+}
+
 /**
- * Analyzes a scraped product page and returns a structured ProductUnderstanding.
+ * Hyper-flexible repair function for product data.
+ * Ensures the pipeline proceeds even if Gemini returns a non-standard structure.
  */
+function repairProductUnderstanding(raw: any, url: string): ProductUnderstanding {
+  const p = raw || {}
+
+  const repaired: ProductUnderstanding = {
+    product_name: p.product_name || p.name || 'Product Demo',
+    tagline: p.tagline || p.description || 'A revolutionary new tool.',
+    core_value_prop: p.core_value_prop || p.value_prop || 'Innovative solution.',
+    target_audience: p.target_audience || 'Professionals',
+    top_5_features: Array.isArray(p.top_5_features) ? p.top_5_features : ['Easy to use', 'Fast', 'Reliable'],
+    brand_tone: p.brand_tone || 'professional',
+    product_category: p.product_category || 'software',
+    problem_being_solved: p.problem_being_solved || 'inefficiency',
+    key_pages_to_visit: Array.isArray(p.key_pages_to_visit) ? p.key_pages_to_visit : [],
+    demo_flow: []
+  }
+
+  // Repair demo flow
+  const rawFlow = p.demo_flow || p.steps || p.flow || p.plan || []
+  if (Array.isArray(rawFlow) && rawFlow.length > 0) {
+    repaired.demo_flow = rawFlow.map((s: any, i: number) => repairDemoStep(s, i, url))
+  } else {
+    // Fallback flow if Gemini totally failed
+    repaired.demo_flow = [
+      { step: 1, action: 'navigate', description: 'Open the landing page', narration: `Welcome to ${repaired.product_name}.`, navigate_to: url },
+      { step: 2, action: 'scroll_down', description: 'Explore the hero section', narration: `${repaired.product_name} helps you ${repaired.problem_being_solved}.` },
+      { step: 3, action: 'scroll_down', description: 'View features section', narration: `Let's see what ${repaired.product_name} can do.` },
+      { step: 4, action: 'wait', description: 'Reviewing the page', narration: `${repaired.product_name} — try it today.` }
+    ]
+  }
+
+  return repaired
+}
+
+function repairScript(raw: any, understanding: ProductUnderstanding, videoLength: number): VideoScript {
+  const segments: ScriptSegment[] = []
+
+  if (raw && Array.isArray(raw.segments) && raw.segments.length > 0) {
+    for (const seg of raw.segments) {
+      segments.push({
+        start_time: seg.start_time ?? 0,
+        end_time: seg.end_time ?? 5,
+        narration: seg.narration || '',
+        what_to_show: seg.what_to_show || '',
+        action: seg.action || 'wait',
+      })
+    }
+  } else {
+    // Build segments from demo_flow narrations as fallback
+    const stepDuration = Math.floor(videoLength / Math.max(understanding.demo_flow.length, 1))
+    let time = 0
+    for (const step of understanding.demo_flow) {
+      segments.push({
+        start_time: time,
+        end_time: time + stepDuration,
+        narration: step.narration,
+        what_to_show: step.description,
+        action: step.action,
+      })
+      time += stepDuration
+    }
+  }
+
+  return {
+    total_duration: raw?.total_duration || videoLength,
+    segments
+  }
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
+
 export async function understandProduct(
   productUrl: string,
   scrapedContent: string,
   description?: string,
   videoLength: number = 60
 ): Promise<ProductUnderstanding> {
-  const systemInstruction =
-    'You are an expert product analyst. Analyze products and return ONLY valid JSON — no markdown, no code fences, no explanation.'
+  const descriptionBlock = description
+    ? `\n\nADDITIONAL CONTEXT FROM THE USER:\n${description}`
+    : ''
 
-  const prompt = `Analyze this product and return ONLY valid JSON matching this exact structure:
-{
-  "product_name": "string",
-  "tagline": "string (one punchy sentence)",
-  "core_value_prop": "string",
-  "target_audience": "string",
-  "top_5_features": ["string","string","string","string","string"],
-  "brand_tone": "string",
-  "product_category": "string",
-  "problem_being_solved": "string",
-  "key_pages_to_visit": ["string"],
-  "demo_flow": [
-    {
-      "step": 1,
-      "action": "navigate | click | scroll_down | scroll_up | wait | hover | type",
-      "description": "string (what this step demonstrates to the viewer)",
-      "element_to_click": "string (required for click/hover/type — visible button/link text only)",
-      "navigate_to": "string (FULL URL — required for navigate — must be an EXACT URL from the PAGE LIST below)",
-      "type_text": "string (text to type — required for type action)"
-    }
-  ]
-}
+  const prompt = `Analyze this product and create a comprehensive understanding + demo flow.
 
-━━━ SCRAPED CONTENT (multiple pages) ━━━
-The content below was crawled from the product's actual website. Each section
-starts with "### PAGE: <url>". These are REAL URLs that exist on the site.
+PRODUCT URL: ${productUrl}
 
-CRITICAL — navigate_to fields:
-- You MUST use only URLs that appear in the "### PAGE:" headers below.
-- Do NOT invent URLs. Do NOT guess paths. Only use URLs you can see in the content.
-- If you want to navigate somewhere, find its exact URL in the page list.
+VIDEO LENGTH: ${videoLength} seconds (plan approximately ${Math.floor(videoLength / 4)} demo steps)
+${descriptionBlock}
 
-━━━ demo_flow REQUIREMENTS ━━━
-You are scripting a PROFESSIONAL PRODUCT LAUNCH VIDEO, not a website tour.
-The viewer wants to see the product SOLVE A PROBLEM — not watch someone browse a website.
+SCRAPED WEBSITE CONTENT:
+${scrapedContent.slice(0, 20000)}
 
-Follow this exact structure (the "90-second rule"):
+Remember:
+- Use the EXACT visible button/link text for element_to_click
+- Generate 10-${Math.floor(videoLength / 4)} demo steps
+- Include clicks, typing, navigation to different pages
+- Each step needs a "narration" field describing what the viewer sees
+- Follow the narrative arc: Hook → Intro → Feature demos → CTA
+- Return ONLY valid JSON, no markdown fences`
 
-PHASE 1 — HOOK (steps 1-2, ~5 seconds):
-  - Start at the main product URL
-  - Show the hero section for a maximum of 3 seconds
-  - ONE scroll_down to reveal a key benefit headline, then STOP scrolling
-
-PHASE 2 — PRODUCT REVEAL (steps 3-4, ~10 seconds):
-  - Navigate IMMEDIATELY to the actual product interface (dashboard, app, editor, workspace)
-  - If the product has an authenticated area, navigate to its main functional page
-  - Show the core interface loading — this is the "aha" moment
-
-PHASE 3 — KEY WORKFLOWS (steps 5-${videoLength <= 30 ? '4' : videoLength <= 60 ? '10' : '14'}, ~${videoLength - 20} seconds):
-  - Demonstrate 2-3 core workflows that show the product solving a real problem
-  - Click buttons, fill forms (type), open dropdowns, toggle features
-  - Each workflow: click → see result → brief wait → move to next
-  - This is the HEART of the video. Spend the most time here.
-
-PHASE 4 — CTA (steps ${videoLength <= 30 ? '5-6' : videoLength <= 60 ? '11-12' : '15-16'}, ~5 seconds):
-  - Navigate back to the landing page
-  - Hover or click the main CTA button ("Get Started", "Try Free", etc.)
-
-TOTAL: Generate exactly ${videoLength <= 30 ? '5–7' : videoLength <= 60 ? '10–14' : '14–18'} steps. No more, no less.
-
-ABSOLUTE RULES — NEVER VIOLATE:
-❌ NEVER generate steps for login, sign-in, sign-up, or authentication pages
-❌ NEVER generate steps that navigate to /login, /signin, /auth, /register paths
-❌ NEVER generate more than 2 scroll_down steps IN A ROW
-❌ NEVER generate more than 3 scroll_down steps TOTAL in the entire flow
-❌ NEVER generate steps to visit a pricing page (pricing is marketing, not product)
-❌ NEVER generate steps for cookie consent, popups, or notification dismissal
-❌ NEVER generate steps for settings, profile, or account management pages
-✅ ALWAYS spend 60%+ of steps inside the actual product interface
-✅ ALWAYS include at least 2 "click" actions on interactive product elements
-✅ ALWAYS include at least 1 "type" action if the product has any input field
-✅ ALWAYS use "wait" after every "navigate" step (page needs time to load)
-
-STEP GUIDELINES:
-- "click": buttons, tabs, cards, nav items, toggles, interactive elements (visible text only)
-- "navigate": to move to a different page — MUST use an exact URL from PAGE list
-- "scroll_down": reveal content below fold — USE SPARINGLY (max 3 total)
-- "scroll_up": return to top of page
-- "wait": after every navigate and after every major CTA click
-- "hover": for tooltips, dropdown menus, hover-reveal content
-- "type": for search inputs, forms, text editors — include type_text with realistic demo data
-
-ELEMENT TARGETING (critical for automation):
-- element_to_click = the EXACT VISIBLE TEXT on the button or link
-  Examples: "Get Started", "Create New", "Dashboard", "Add Item", "Submit"
-- NEVER use CSS class names, IDs, or HTML attributes — they WILL fail
-- Keep it SHORT (1–6 words) matching what the user actually sees on screen
-- For nav items: exact label shown in the nav bar
-- For inputs: the placeholder text shown inside the input field
-
-Product URL: ${productUrl}
-User description: ${description ?? 'Not provided'}
-
-${scrapedContent.slice(0, 40000)}`
-
-  const text = await generateWithFallback(systemInstruction, prompt)
+  const text = await generateWithFallback(UNDERSTAND_SYSTEM_PROMPT, prompt)
   const jsonText = extractJson(text)
 
-  let parsed: unknown
   try {
-    parsed = JSON.parse(jsonText)
-  } catch {
-    logger.error('understandProduct: Gemini returned non-JSON', { raw: text.slice(0, 500) })
-    throw new Error('Gemini returned malformed JSON. Please try again.')
+    const raw = JSON.parse(jsonText.replace(/\\n/g, ' '))
+    return repairProductUnderstanding(raw, productUrl)
+  } catch (err) {
+    logger.warn('understandProduct: failed to parse JSON, using fallback repair', { error: err })
+    return repairProductUnderstanding({}, productUrl)
   }
-
-  const p = parsed as Record<string, unknown>
-  if (
-    !p.product_name ||
-    !p.tagline ||
-    !Array.isArray(p.demo_flow) ||
-    p.demo_flow.length === 0
-  ) {
-    logger.error('understandProduct: missing required fields', { parsed })
-    throw new Error('Gemini response was missing required fields. Please try again.')
-  }
-
-  return parsed as ProductUnderstanding
 }
 
-/**
- * Generates a professional video script timed to the recorded demo.
- */
 export async function generateScript(
   understanding: ProductUnderstanding,
   tone: VideoTone,
   videoLength: VideoLength
 ): Promise<VideoScript> {
-  const systemInstruction =
-    'You are a world-class product video scriptwriter. Return ONLY valid JSON — no markdown, no code fences, no explanation.'
+  const prompt = `Write a ${videoLength}-second video script for the following product.
 
-  const prompt = `Write a ${videoLength}-second product launch video script for "${understanding.product_name}".
-The script must be precisely timed to align with a user demo of the product. Use the provided demo_flow to structure the segments.
-For each segment, YOU MUST map the corresponding demo_flow step to the script segment. Extract the "what_to_show" field and derive the exact action from it.
+PRODUCT NAME: ${understanding.product_name}
+TAGLINE: ${understanding.tagline}
+CORE VALUE PROPOSITION: ${understanding.core_value_prop}
+TARGET AUDIENCE: ${understanding.target_audience}
+KEY FEATURES: ${understanding.top_5_features.join(', ')}
+PROBLEM SOLVED: ${understanding.problem_being_solved}
+PRODUCT CATEGORY: ${understanding.product_category}
+TONE: ${tone}
 
-Return ONLY valid JSON:
-{
-  "total_duration": ${videoLength},
-  "segments": [
-    {
-      "start_time": 0,
-      "end_time": 5,
-      "narration": "exact words to speak",
-      "what_to_show": "what appears on screen",
-      "zoom_target": "optional element to zoom",
-      "action": "navigate | click | scroll_down | scroll_up | wait",
-      "element_to_click": "optional string from demo_flow",
-      "navigate_to": "optional URL from demo_flow",
-      "type_text": "optional text from demo_flow"
-    }
-  ]
-}
+DEMO FLOW (your script segments must match these steps 1:1):
+${JSON.stringify(understanding.demo_flow.map(s => ({
+  step: s.step,
+  action: s.action,
+  description: s.description,
+  narration: s.narration
+})), null, 2)}
 
-Rules:
-- Hook (0-5s): open with the pain point
-- Solution (5-15s): introduce ${understanding.product_name}
-- Features (15-${videoLength - 5}s): narrate each feature
-- CTA (last 5s): strong call to action
+RULES:
+- Generate exactly ${understanding.demo_flow.length} segments, one per demo step
+- Total duration must be ${videoLength} seconds
+- Each segment narration should expand on the corresponding demo step's narration
+- Reference "${understanding.product_name}" by name
 - Tone: ${tone}
-- Audience: ${understanding.target_audience}
-- Value prop: ${understanding.core_value_prop}
-- Features: ${understanding.top_5_features.join(', ')}
+- Return ONLY valid JSON, no markdown fences`
 
-Here is the exact demo_flow to follow for actions:
-${JSON.stringify(understanding.demo_flow, null, 2)}`
-
-  const text = await generateWithFallback(systemInstruction, prompt)
+  const text = await generateWithFallback(SCRIPT_SYSTEM_PROMPT, prompt)
   const jsonText = extractJson(text)
 
-  let parsed: unknown
   try {
-    parsed = JSON.parse(jsonText)
-  } catch {
-    logger.error('generateScript: Gemini returned non-JSON', { raw: text.slice(0, 500) })
-    throw new Error('Gemini returned malformed JSON for script. Please try again.')
+    const raw = JSON.parse(jsonText.replace(/\\n/g, ' '))
+    return repairScript(raw, understanding, videoLength)
+  } catch (err) {
+    logger.warn('generateScript: parse failed, building from demo_flow narrations', { error: err })
+    return repairScript({}, understanding, videoLength)
   }
-
-  const p = parsed as Record<string, unknown>
-  if (typeof p.total_duration !== 'number' || !Array.isArray(p.segments) || p.segments.length === 0) {
-    logger.error('generateScript: missing required fields', { parsed })
-    throw new Error('Gemini script response was missing required fields. Please try again.')
-  }
-
-  return parsed as VideoScript
 }
 
+export async function analyzePageState(
+  pageUrl: string,
+  pageSnapshot: string,
+  upcomingSteps: DemoStep[]
+): Promise<any> {
+  const prompt = `Analyze this page snapshot and help the demo recorder find the next elements.
+
+CURRENT URL: ${pageUrl}
+
+UPCOMING DEMO STEPS:
+${JSON.stringify(upcomingSteps, null, 2)}
+
+PAGE SNAPSHOT (Simplified DOM):
+${pageSnapshot.slice(0, 10000)}
+
+Return JSON identifying if the elements for the next steps are visible and if any text/label corrections are needed.`
+
+  const text = await generateWithFallback(ANALYZE_PAGE_SYSTEM_PROMPT, prompt)
+  const jsonText = extractJson(text)
+  
+  try {
+    return JSON.parse(jsonText.replace(/\\n/g, ' '))
+  } catch (err) {
+    logger.warn('analyzePageState: parse failed', { error: err })
+    return { is_target_ready: true, corrections: [] }
+  }
+}

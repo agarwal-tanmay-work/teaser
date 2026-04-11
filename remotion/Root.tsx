@@ -3,13 +3,27 @@ import { TeaserVideo, TeaserVideoProps } from './TeaserVideo';
 import React from 'react';
 
 const INTRO_SECONDS = 3;
-const OUTRO_SECONDS = 3;
+const OUTRO_SECONDS = 4;
 
 export const RemotionRoot: React.FC = () => {
   const inputProps = getInputProps() as any;
-  // videoLength is in seconds (30/60/90). Add intro+outro time and convert to frames at 30fps
-  const videoSeconds = (inputProps.videoLength || 60) + INTRO_SECONDS + OUTRO_SECONDS;
-  const durationInFrames = videoSeconds * 30;
+
+  // Calculate total duration by summing all curated clips
+  const fps = 30;
+  let totalDemoFrames = 0;
+  if (inputProps.scenes) {
+    for (const scene of inputProps.scenes) {
+      if (scene.clips) {
+        for (const clip of scene.clips) {
+          totalDemoFrames += Math.round(((clip.end - clip.start) / 1000) * fps);
+        }
+      }
+    }
+  }
+
+  const demoDuration = totalDemoFrames > 0 ? (totalDemoFrames / fps) : 10;
+  const videoSeconds = INTRO_SECONDS + demoDuration + OUTRO_SECONDS;
+  const durationInFrames = Math.ceil(videoSeconds * fps);
 
   return (
     <>
@@ -21,10 +35,10 @@ export const RemotionRoot: React.FC = () => {
         width={1920}
         height={1080}
         defaultProps={{
-          rawVideoUrl: '',
-          clickEvents: [],
+          scenes: [],
           productName: 'Teaser AI',
           tagline: 'Record your product effortlessly',
+          productUrl: 'https://useteaser.com',
         } as TeaserVideoProps}
       />
     </>

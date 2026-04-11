@@ -5,6 +5,8 @@ import { createServerClient as createSSRClient } from '@supabase/ssr'
 import { createServiceClient } from '@/lib/supabase'
 import type { ApiResponse } from '@/types'
 import { spawn } from 'child_process'
+import fs from 'fs'
+import path from 'path'
 
 export const maxDuration = 600
 
@@ -84,14 +86,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
   })
 
   // ── Spawn Background Process ───────────────────────────────────────────────
+  // Redirect logs to a file in the project root for diagnostics
+  const logFile = path.join(process.cwd(), 'worker.log')
+  const out = fs.openSync(logFile, 'a')
+  const err = fs.openSync(logFile, 'a')
+
   const worker = spawn('npx', [
     'ts-node', '--project', 'tsconfig.worker.json',
     '-r', 'tsconfig-paths/register', 'workers/videoProcessor.ts'
   ], {
     env: { ...process.env, JOB_PAYLOAD: jobPayload },
-    stdio: 'ignore',
+    stdio: ['ignore', out, err],
     windowsHide: true,
     detached: true,
+    shell: true, // Required for npx batch file on Windows
   })
   worker.unref()
 

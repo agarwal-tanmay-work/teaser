@@ -3,9 +3,10 @@ import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } fr
 
 interface OutroProps {
   productName: string;
+  productUrl?: string;
 }
 
-export const Outro: React.FC<OutroProps> = ({ productName }) => {
+export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
 
@@ -23,7 +24,7 @@ export const Outro: React.FC<OutroProps> = ({ productName }) => {
   const ctaY = interpolate(ctaProgress, [0, 1], [50, 0]);
   const ctaOpacity = interpolate(ctaProgress, [0, 1], [0, 1]);
 
-  // Tagline entrance — staggered
+  // URL entrance — staggered
   const tagProgress = spring({
     frame: frame - 25,
     fps,
@@ -39,6 +40,14 @@ export const Outro: React.FC<OutroProps> = ({ productName }) => {
     [0, 1],
     { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
   );
+
+  // Extract display URL
+  let displayUrl = 'useteaser.com';
+  if (productUrl) {
+    try {
+      displayUrl = new URL(productUrl).hostname.replace(/^www\./, '');
+    } catch { /* fallback */ }
+  }
 
   return (
     <AbsoluteFill style={{
@@ -82,7 +91,7 @@ export const Outro: React.FC<OutroProps> = ({ productName }) => {
           transform: `translateY(${tagY}px)`,
           opacity: tagOpacity,
         }}>
-          useteaser.com
+          {displayUrl}
         </p>
       </div>
 

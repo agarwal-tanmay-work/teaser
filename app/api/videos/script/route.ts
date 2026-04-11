@@ -18,10 +18,12 @@ const ScriptSchema = z.object({
     demo_flow: z.array(
       z.object({
         step: z.number(),
-        action: z.enum(['scroll_down', 'scroll_up', 'click', 'navigate', 'wait']),
+        action: z.enum(['scroll_down', 'scroll_up', 'click', 'navigate', 'wait', 'hover', 'type']),
         description: z.string(),
+        narration: z.string().optional(),
         element_to_click: z.string().optional(),
         navigate_to: z.string().optional(),
+        type_text: z.string().optional(),
       })
     ),
   }),
@@ -53,7 +55,7 @@ export async function POST(
 
     let script: VideoScript
     try {
-      script = await generateScript(product_understanding, tone, video_length)
+      script = await generateScript(product_understanding as any, tone, video_length)
     } catch (error) {
       logger.error('videos/script: Gemini script generation failed', { error })
       return NextResponse.json(

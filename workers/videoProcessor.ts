@@ -6,7 +6,6 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { createServiceClient } from '../lib/supabase'
-import { generateVoiceover } from '../lib/elevenlabs'
 import { logger } from '../lib/logger'
 import { crawlSite } from '../lib/firecrawl'
 import { understandProduct, generateScript } from '../lib/gemini'
@@ -28,10 +27,8 @@ function buildRedisConnection(): { host: string; port: number; password: string;
   if (!restUrl || !token) {
     logger.warn('videoProcessor: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set — worker will fail to connect')
   }
-  // Parse port from URL (Upstash TLS uses 6380, not 6379)
   const parsed = restUrl ? new URL(restUrl) : null
   const host = parsed?.hostname ?? '127.0.0.1'
-  // Upstash often requires explicit IPv4 and servername for direct TCP connections
   return { host, port: 6379, password: token, tls: { servername: host }, family: 4 }
 }
 
@@ -64,37 +61,40 @@ async function updateProgress(
   }
 }
 
-
-
 /**
  * BullMQ worker that processes video generation jobs end-to-end.
  *
  * Stages:
  *   Stage 1 (0-15%):  Product understanding via Firecrawl + Gemini
- *   Stage 2 (15-35%): Script generation via Gemini
- *   Stage 3 (35-55%): Browser recording via Playwright
- *   Stage 4 (55-70%): Voiceover generation via ElevenLabs
- *   Stage 5 (70-90%): Video assembly via FFmpeg
+ *   Stage 2 (15-35%): Script generation via Gemini (narration tied to demo flow)
+ *   Stage 3 (35-60%): Screenshot-based browser capture via Playwright
+ *   Stage 4 (60-70%): Silent audio generation (TTS disabled for now)
+ *   Stage 5 (70-90%): Video composition via Remotion + FFmpeg
  *   Stage 6 (90-100%): Upload to Supabase Storage + cleanup
- *
- * On any failure: logs the error, marks the job as 'failed' in Supabase, rethrows.
  */
 const _redisConn = buildRedisConnection()
 
 export async function processJob(jobData: WorkerJobData) {
   const { jobId, product_url, description, tone, video_length, credentials } = jobData
   const supabase = createServiceClient()
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
+  logger.info(`videoProcessor: job ${jobId} starting`)
+  
   const voiceoverPath = path.join(os.tmpdir(), 'teaser-voiceovers', `${jobId}.mp3`)
-  let recordingPath = ''
+  let recordingDir = ''
   let finalVideoPath = ''
+
+  // Master timeout (30 mins)
+  const timeoutId = setTimeout(async () => {
+    logger.error(`videoProcessor: job ${jobId} timed out after 30 minutes`)
+    await supabase.from('video_jobs').update({ status: 'failed', error_message: 'Generation timed out. Please try again.' }).eq('id', jobId)
+    process.exit(1)
+  }, 30 * 60 * 1000)
 
   try {
     // ─── STAGE 1: Product Understanding (0 → 15%) ─────────────────────────
     await updateProgress(jobId, 5, 'Analyzing your product...')
 
-    // Direct call instead of fetchInternal loop
     const scrapedContent = await crawlSite(product_url, async (msg) => {
       await updateProgress(jobId, 5, msg)
     })
@@ -106,7 +106,9 @@ export async function processJob(jobData: WorkerJobData) {
       .update({ product_understanding: understanding })
       .eq('id', jobId)
 
-    await updateProgress(jobId, 15, 'Got it. Writing your script...')
+    await updateProgress(jobId, 15, 'Product analyzed. Writing your script...')
+
+    logger.info(`videoProcessor: ${jobId} — understood product: ${understanding.product_name} (${understanding.demo_flow.length} demo steps)`)
 
     // ─── STAGE 2: Script Generation (15 → 35%) ────────────────────────────
     const script = await generateScript(understanding, tone, video_length)
@@ -116,125 +118,121 @@ export async function processJob(jobData: WorkerJobData) {
       .update({ script })
       .eq('id', jobId)
 
-    await updateProgress(jobId, 35, 'Script ready. Opening your product in our browser...')
+    await updateProgress(jobId, 35, 'Script ready. Capturing product screenshots...')
 
-      // ─── STAGE 3: Browser Recording (35 → 55%) ────────────────────────────
-      recordingPath = await recordProduct(
-        product_url,
-        understanding,
-        jobId,
-        credentials
-      )
+    logger.info(`videoProcessor: ${jobId} — script generated: ${script.segments.length} segments, ${script.total_duration}s`)
 
-      await updateProgress(jobId, 55, 'Demo recorded. Preparing video...')
-
-      // ─── STAGE 4: Voiceover — TEMPORARILY DISABLED (Gemini TTS quota exceeded) ──
-      // To re-enable: uncomment the lines below and remove the silent-audio block.
-      //
-      // fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
-      // const fullScript = script.segments.map((s) => s.narration).join(' ')
-      // await generateVoiceover(fullScript, tone, voiceoverPath)
-      //
-      // ── Temporary: generate 90s of silence as stand-in voiceover ─────────
-      {
-        const { getFfmpegPath } = await import('../lib/ffmpegUtils')
-        const { spawn } = await import('child_process')
-        fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
-        await new Promise<void>((resolve, reject) => {
-          const p = spawn(getFfmpegPath(), [
-            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-            '-t', '90',
-            '-c:a', 'libmp3lame', '-b:a', '128k',
-            '-y', voiceoverPath,
-          ])
-          p.on('close', (code) => code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`)))
-          p.on('error', reject)
-        })
-      }
-
-      await updateProgress(jobId, 70, 'Editing your video...')
-
-    // ─── STAGE 5: Video Assembly (70 → 90%) ───────────────────────────────
-    finalVideoPath = await assembleVideo({
-      recordingPath,
-      voiceoverPath,
-      script,
+    // ─── STAGE 3: Screenshot-Based Browser Capture (35 → 60%) ──────────────
+    recordingDir = await recordProduct(
+      product_url,
       understanding,
-      videoLength: video_length,
       jobId,
-    })
+      credentials
+    )
 
-      await updateProgress(jobId, 90, 'Almost done. Uploading your video...')
+    await updateProgress(jobId, 60, 'Screenshots captured. Preparing video...')
 
-      // ─── STAGE 6: Upload + Cleanup (90 → 100%) ────────────────────────────
-      const videoBuffer = fs.readFileSync(finalVideoPath)
-
-      const { error: uploadError } = await supabase.storage
-        .from('videos')
-        .upload(`${jobId}/final.mp4`, videoBuffer, {
-          contentType: 'video/mp4',
-          upsert: true,
-        })
-
-      if (uploadError) {
-        throw new Error(`Upload to Supabase Storage failed: ${uploadError.message}`)
-      }
-
-      const { data: urlData } = supabase.storage
-        .from('videos')
-        .getPublicUrl(`${jobId}/final.mp4`)
-
-      await supabase
-        .from('video_jobs')
-        .update({
-          status: 'completed',
-          progress: 100,
-          progress_message: 'Your video is ready!',
-          final_video_url: urlData.publicUrl,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-
-      // Cleanup all temp files
-      const recordingDir = path.join(os.tmpdir(), 'teaser-recordings', jobId)
-      if (fs.existsSync(recordingDir)) {
-        fs.rmSync(recordingDir, { recursive: true, force: true })
-      }
-      if (fs.existsSync(voiceoverPath)) {
-        fs.rmSync(voiceoverPath, { force: true })
-      }
-      if (fs.existsSync(finalVideoPath)) {
-        fs.rmSync(finalVideoPath, { force: true })
-      }
-
-      logger.info(`videoProcessor: job ${jobId} completed successfully`)
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'An unexpected error occurred'
-      logger.error(`videoProcessor: job ${jobId} failed`, { error })
-
-      await supabase
-        .from('video_jobs')
-        .update({ status: 'failed', error_message: message })
-        .eq('id', jobId)
-
-      // Best-effort cleanup on failure
-      const recordingDir = path.join(os.tmpdir(), 'teaser-recordings', jobId)
-      if (fs.existsSync(recordingDir)) {
-        fs.rmSync(recordingDir, { recursive: true, force: true })
-      }
-      if (fs.existsSync(voiceoverPath)) {
-        fs.rmSync(voiceoverPath, { force: true })
-      }
-      if (finalVideoPath && fs.existsSync(finalVideoPath)) {
-        fs.rmSync(finalVideoPath, { force: true })
-      }
-
-      throw error
+    // ─── STAGE 4: Silent Audio (TTS disabled to save credits) ──────────────
+    {
+      const { getFfmpegPath } = await import('../lib/ffmpegUtils')
+      const { spawn } = await import('child_process')
+      fs.mkdirSync(path.join(os.tmpdir(), 'teaser-voiceovers'), { recursive: true })
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn(getFfmpegPath(), [
+          '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+          '-t', String(video_length + 10), // extra padding
+          '-c:a', 'libmp3lame', '-b:a', '128k',
+          '-y', voiceoverPath,
+        ])
+        p.on('close', (code) => code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`)))
+        p.on('error', reject)
+      })
     }
+
+    await updateProgress(jobId, 70, 'Composing your video...')
+
+    // ─── STAGE 5: Video Composition via Remotion (70 → 90%) ────────────────
+    await updateProgress(jobId, 70, 'Composing your video (this may take a few minutes)...')
+    
+    finalVideoPath = await assembleVideo({
+      recordingDir,
+      voiceoverPath,
+      jobId,
+      productUrl: product_url,
+    })
+    
+    await updateProgress(jobId, 85, 'Video rendered. Applying finishing touches...')
+
+    await updateProgress(jobId, 90, 'Almost done. Uploading...')
+
+    // ─── STAGE 6: Upload + Cleanup (90 → 100%) ────────────────────────────
+    const videoBuffer = fs.readFileSync(finalVideoPath)
+
+    const { error: uploadError } = await supabase.storage
+      .from('videos')
+      .upload(`${jobId}/final.mp4`, videoBuffer, {
+        contentType: 'video/mp4',
+        upsert: true,
+      })
+
+    if (uploadError) {
+      throw new Error(`Upload to Supabase Storage failed: ${uploadError.message}`)
+    }
+
+    const { data: urlData } = supabase.storage
+      .from('videos')
+      .getPublicUrl(`${jobId}/final.mp4`)
+
+    await supabase
+      .from('video_jobs')
+      .update({
+        status: 'completed',
+        progress: 100,
+        progress_message: 'Your video is ready!',
+        final_video_url: urlData.publicUrl,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', jobId)
+
+    // Cleanup
+    if (recordingDir && fs.existsSync(recordingDir)) {
+      fs.rmSync(recordingDir, { recursive: true, force: true })
+    }
+    if (fs.existsSync(voiceoverPath)) {
+      fs.rmSync(voiceoverPath, { force: true })
+    }
+    if (fs.existsSync(finalVideoPath)) {
+      fs.rmSync(finalVideoPath, { force: true })
+    }
+
+    clearTimeout(timeoutId)
+    logger.info(`videoProcessor: job ${jobId} completed successfully`)
+  } catch (error: unknown) {
+    clearTimeout(timeoutId)
+    const message = error instanceof Error ? error.message : 'An unexpected error occurred'
+    logger.error(`videoProcessor: job ${jobId} failed`, { error })
+
+    await supabase
+      .from('video_jobs')
+      .update({ status: 'failed', error_message: message })
+      .eq('id', jobId)
+
+    // Best-effort cleanup
+    if (recordingDir && fs.existsSync(recordingDir)) {
+      fs.rmSync(recordingDir, { recursive: true, force: true })
+    }
+    if (fs.existsSync(voiceoverPath)) {
+      fs.rmSync(voiceoverPath, { force: true })
+    }
+    if (finalVideoPath && fs.existsSync(finalVideoPath)) {
+      fs.rmSync(finalVideoPath, { force: true })
+    }
+
+    throw error
+  }
 }
 
 // ── Background CLI Execution ──────────────────────────────────────────────────
-// This allows us to bypass BullMQ entirely and run jobs without Redis via spawn
 if (require.main === module) {
   const jobPayload = process.env.JOB_PAYLOAD
   if (jobPayload) {
