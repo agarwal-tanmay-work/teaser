@@ -41,6 +41,7 @@ interface WorkerJobData {
   video_length: VideoLength
   features?: string
   credentials?: { username: string; password: string }
+  start_url?: string
 }
 
 /**
@@ -75,11 +76,11 @@ async function updateProgress(
 const _redisConn = buildRedisConnection()
 
 export async function processJob(jobData: WorkerJobData) {
-  const { jobId, product_url, description, tone, video_length, credentials } = jobData
+  const { jobId, product_url, description, tone, video_length, credentials, start_url } = jobData
   const supabase = createServiceClient()
 
-  logger.info(`videoProcessor: job ${jobId} starting`)
-  
+  logger.info(`videoProcessor: job ${jobId} starting${start_url ? ` (demo start URL: ${start_url})` : ''}`)
+
   const voiceoverPath = path.join(os.tmpdir(), 'teaser-voiceovers', `${jobId}.mp3`)
   let recordingDir = ''
   let finalVideoPath = ''
@@ -118,19 +119,20 @@ export async function processJob(jobData: WorkerJobData) {
       .update({ script })
       .eq('id', jobId)
 
-    await updateProgress(jobId, 35, 'Script ready. Capturing product screenshots...')
+    await updateProgress(jobId, 35, 'Script ready. Recording your product demo...')
 
     logger.info(`videoProcessor: ${jobId} — script generated: ${script.segments.length} segments, ${script.total_duration}s`)
 
-    // ─── STAGE 3: Screenshot-Based Browser Capture (35 → 60%) ──────────────
+    // ─── STAGE 3: Vision-Guided Browser Recording (35 → 60%) ───────────────
     recordingDir = await recordProduct(
       product_url,
       understanding,
       jobId,
-      credentials
+      credentials,
+      start_url
     )
 
-    await updateProgress(jobId, 60, 'Screenshots captured. Preparing video...')
+    await updateProgress(jobId, 60, 'Demo recorded. Composing your video...')
 
     // ─── STAGE 4: Silent Audio (TTS disabled to save credits) ──────────────
     {

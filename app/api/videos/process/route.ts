@@ -14,6 +14,7 @@ const ProcessSchema = z.object({
   credentials: z
     .object({ username: z.string(), password: z.string() })
     .optional(),
+  start_url: z.string().url().optional(),
 })
 
 /**
@@ -51,6 +52,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
   const rawBody: unknown = await req.json().catch(() => ({}))
   const { data: parsedBody } = ProcessSchema.safeParse(rawBody)
   const credentials = parsedBody?.credentials
+  const start_url = parsedBody?.start_url
 
   // ── Load job ──────────────────────────────────────────────────────────────
   const db = createServiceClient()
@@ -83,6 +85,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     video_length: job.video_length as 30 | 60 | 90,
     tone: job.tone as 'professional' | 'conversational' | 'energetic',
     credentials,
+    start_url,
   })
 
   // ── Spawn Background Process ───────────────────────────────────────────────

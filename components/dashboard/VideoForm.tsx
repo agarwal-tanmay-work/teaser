@@ -33,6 +33,7 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
   const [features, setFeatures] = useState('')
   const [credUsername, setCredUsername] = useState('')
   const [credPassword, setCredPassword] = useState('')
+  const [startUrl, setStartUrl] = useState('')
 
   const [showCustomize, setShowCustomize] = useState(false)
   const [showCredentials, setShowCredentials] = useState(false)
@@ -81,6 +82,9 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
       const processBody: Record<string, unknown> = {}
       if (credUsername && credPassword) {
         processBody.credentials = { username: credUsername, password: credPassword }
+      }
+      if (startUrl && isValidUrl(startUrl)) {
+        processBody.start_url = startUrl
       }
       fetch(`/api/videos/process?jobId=${jobId}`, {
         method: 'POST',
@@ -262,6 +266,21 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
               autoComplete="new-password"
               className="w-full px-4 py-3 bg-[#0A0A0A] border border-[#1F1F1F] rounded-md text-white placeholder:text-[#6E6E6E] focus:outline-none focus:border-white transition-colors"
             />
+            <div>
+              <label className="block text-white text-sm font-medium mb-1">
+                Demo start URL <span className="text-[#6E6E6E] font-normal">(optional)</span>
+              </label>
+              <input
+                type="url"
+                value={startUrl}
+                onChange={(e) => setStartUrl(e.target.value)}
+                placeholder="https://app.yourproduct.com/dashboard"
+                className="w-full px-4 py-3 bg-[#0A0A0A] border border-[#1F1F1F] rounded-md text-white placeholder:text-[#6E6E6E] focus:outline-none focus:border-white transition-colors"
+              />
+              <p className="mt-1 text-[#6E6E6E] text-xs">
+                Skip the homepage — start recording directly inside your app after login
+              </p>
+            </div>
           </div>
         )}
       </div>

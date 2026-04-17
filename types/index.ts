@@ -145,9 +145,22 @@ export interface UserProfile {
   created_at: string
 }
 
+/** A single action decision returned by the vision-based demo agent */
+export interface AgentAction {
+  action: DemoAction | 'done'
+  element_text?: string
+  navigate_to?: string
+  type_text?: string
+  description: string
+  narration: string
+  skip_from_video?: boolean
+}
+
 /** Input payload for creating a new video job */
 export interface VideoJobCreateInput {
   product_url: string
+  /** Where the recording agent starts inside the app — use this for post-login app URLs */
+  start_url?: string
   description?: string
   video_length: VideoLength
   tone: VideoTone
