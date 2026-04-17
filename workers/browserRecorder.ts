@@ -485,30 +485,36 @@ async function executeAndCapture(
           break
         }
 
-        // URL-sanity: did anything actually change?
+        // URL-sanity: did anything actually change? If not, keep the action clip
+        // but shorten the dwell — a small-change click is still content (e.g. a
+        // tooltip, a subtle menu reveal) and is far better than zero scenes.
         await page.waitForTimeout(500)
         const urlAfter = page.url()
         const scrollAfter = await page.evaluate(() => window.scrollY).catch(() => 0)
+        let shortenedDwell = false
         if (urlBefore === urlAfter && Math.abs(scrollBefore - scrollAfter) < 10 && beforeShot) {
           try {
             const afterShot = await page.screenshot({ type: 'jpeg', quality: 20 })
             const sizeDiff = Math.abs(afterShot.length - beforeShot.length) / Math.max(beforeShot.length, 1)
             if (sizeDiff < 0.02) {
-              logger.warn(`step ${stepIndex}: click had no visible effect — dropping clip`)
-              // Return a no-op scene so videoAssembler filters it out
-              return {
-                step: stepIndex,
-                action: step.action,
-                description: step.description,
-                narration: step.narration,
-                clips: [],
-                targetElement,
-                typeText: step.type_text ?? null,
-                elementNotFound: true,
-                pageUrl: page.url(),
-              }
+              logger.warn(`step ${stepIndex}: click had no visible effect — shortening dwell`)
+              shortenedDwell = true
             }
           } catch { /* non-fatal */ }
+        }
+        if (shortenedDwell) {
+          // Skip the long dwell and the networkidle wait; return what we have.
+          return {
+            step: stepIndex,
+            action: step.action,
+            description: step.description,
+            narration: step.narration,
+            clips,
+            targetElement,
+            typeText: step.type_text ?? null,
+            elementNotFound: false,
+            pageUrl: page.url(),
+          }
         }
         break
       }
@@ -720,58 +726,123 @@ export async function recordProduct(
     await page.addStyleTag({ content: POPUP_HIDE_CSS }).catch(() => {})
     await page.waitForTimeout(1500)
 
-    // ── Build the itinerary ──
-    // Navigate steps define where we go; vision fills in what we do on each page.
+    // ── Click-driven discovery ──
+    // No guessed URLs. The recording walks the product by clicking visible links
+    // Gemini picks from screenshots. Each new page is discovered only by clicking
+    // something real on the previous page, so 404s from hallucinated URLs are
+    // impossible and each subpage gets meaningful per-page interaction before we
+    // navigate away.
     const hasCredentials = !!storageStatePath
     const visionBudget = { used: 0 }
     const ctx: StepContext = { recordingStartTime, visionBudget, hasCredentials }
 
-    // Drop auth-URL navigates from the planned flow (unless credentials present)
-    const textPlanNavigates: DemoStep[] = understanding.demo_flow
-      .filter((s) => s.action === 'navigate')
-      .filter((s) => {
-        if (!s.navigate_to || !s.navigate_to.startsWith('http')) return false
-        if (s.navigate_to.includes('#')) return false  // in-page anchors don't change the page
-        if (!hasCredentials && isAuthUrl(s.navigate_to)) return false
-        return true
-      })
-
-    // Ensure the recordingUrl is the first entry (we're already on it)
-    // Build: [recordingUrl as first page] + [unique nav targets from text plan]
     const visitedUrls: string[] = [recordingUrl]
     const scenes: SceneCapture[] = []
     let sceneIdx = 0
 
-    // Per-page vision for the landing page
-    sceneIdx = await playPageInteractions(page, understanding, visitedUrls, productUrl, ctx, sceneIdx, scenes)
+    // Guaranteed landing-page dwell. A scroll-down + scroll-up pair captures the
+    // hero section regardless of whether vision succeeds — guarantees the final
+    // video always has at least ~8s of real product content.
+    sceneIdx++
+    const introScroll = await executeAndCapture(
+      page,
+      {
+        step: sceneIdx,
+        action: 'scroll_down',
+        description: 'Scroll to reveal the hero section',
+        narration: `Here's ${understanding.product_name}.`,
+      },
+      sceneIdx,
+      productUrl,
+      ctx
+    )
+    scenes.push(introScroll)
 
-    // Walk through unique navigate targets
-    const seenUrls = new Set<string>([normalizeUrl(recordingUrl)])
-    for (const navStep of textPlanNavigates) {
-      if (!navStep.navigate_to) continue
-      const normalizedTarget = normalizeUrl(navStep.navigate_to)
-      if (seenUrls.has(normalizedTarget)) continue
-      seenUrls.add(normalizedTarget)
+    sceneIdx++
+    const introScrollUp = await executeAndCapture(
+      page,
+      {
+        step: sceneIdx,
+        action: 'scroll_up',
+        description: 'Return to the top of the landing page',
+        narration: understanding.tagline || `${understanding.product_name} — at a glance.`,
+      },
+      sceneIdx,
+      productUrl,
+      ctx
+    )
+    scenes.push(introScrollUp)
 
-      sceneIdx++
-      logger.info(`recorder: itinerary step ${sceneIdx} — navigate to ${navStep.navigate_to}`)
-      const navScene = await executeAndCapture(page, navStep, sceneIdx, productUrl, ctx)
-      scenes.push(navScene)
+    const MAX_SCENES = 22
+    const MAX_PAGES = 5
 
-      // Skip in-page vision if navigate clearly failed (we never left previous URL)
-      if (page.url() === visitedUrls[visitedUrls.length - 1]) {
-        logger.warn(`recorder: navigate to ${navStep.navigate_to} did not change URL — skipping in-page actions`)
-        continue
-      }
-      visitedUrls.push(page.url())
+    // Walk the product by click-driven discovery: plan actions on the current
+    // page (allowing a final nav click), execute them, and when the URL changes
+    // the loop continues on the new page with a fresh vision pass.
+    while (sceneIdx < MAX_SCENES && visitedUrls.length < MAX_PAGES) {
+      const urlBefore = page.url()
+      const sceneIdxBefore = sceneIdx
+      const isLastPage = visitedUrls.length >= MAX_PAGES - 1
 
-      // Per-page vision for this page
-      sceneIdx = await playPageInteractions(page, understanding, visitedUrls, productUrl, ctx, sceneIdx, scenes)
+      sceneIdx = await playPageInteractions(
+        page,
+        understanding,
+        visitedUrls,
+        productUrl,
+        ctx,
+        sceneIdx,
+        scenes,
+        !isLastPage,  // allowNavigation: false on the last page
+      )
 
-      // Safety cap to avoid runaway recordings
-      if (sceneIdx >= 22) {
-        logger.info('recorder: reached 22-scene cap — wrapping up')
+      // Vision returned nothing — page is exhausted or Gemini is down
+      if (sceneIdx === sceneIdxBefore) {
+        logger.info('recorder: vision produced no further steps — ending session')
         break
+      }
+
+      const urlAfter = page.url()
+      const normalizedAfter = normalizeUrl(urlAfter)
+      const alreadyVisited = visitedUrls.some((u) => normalizeUrl(u) === normalizedAfter)
+
+      if (urlAfter !== urlBefore && !alreadyVisited) {
+        visitedUrls.push(urlAfter)
+        logger.info(`recorder: discovered new page via click → ${urlAfter} (page ${visitedUrls.length}/${MAX_PAGES})`)
+        await page.addStyleTag({ content: POPUP_HIDE_CSS }).catch(() => {})
+      } else if (urlAfter !== urlBefore && alreadyVisited) {
+        logger.info(`recorder: click looped back to a visited page — ending session`)
+        break
+      } else {
+        logger.info(`recorder: URL did not change after this page's actions — ending session`)
+        break
+      }
+    }
+
+    // ── Emergency safety net ──
+    // If every scene failed to produce a real clip (vision down + navigate
+    // failed + all clicks rejected), synthesize scroll scenes on the current
+    // page so the video isn't just intro + placeholder + outro.
+    const productiveSceneCount = scenes.filter((s) => s.clips.some((c) => c.end - c.start >= 800)).length
+    if (productiveSceneCount === 0) {
+      logger.warn('recorder: zero productive scenes — generating emergency safety clips')
+      for (let i = 0; i < 3; i++) {
+        sceneIdx++
+        const action: DemoStep['action'] = i % 2 === 0 ? 'scroll_down' : 'scroll_up'
+        const safetyScene = await executeAndCapture(
+          page,
+          {
+            step: sceneIdx,
+            action,
+            description: i === 0 ? 'Scroll through the product page' : 'Continue exploring the page',
+            narration: i === 0
+              ? `Take a closer look at ${understanding.product_name}.`
+              : `${understanding.product_name} makes it simple.`,
+          },
+          sceneIdx,
+          productUrl,
+          ctx
+        )
+        scenes.push(safetyScene)
       }
     }
 
@@ -792,19 +863,23 @@ export async function recordProduct(
 
     logger.info(`recorder: WebM recorded (${Math.round(fs.statSync(webmPath).size / 1024 / 1024)} MB) — converting to MP4`)
 
-    // Re-encode with lanczos-interpolated frames for smoother playback.
-    // The source WebM is ~25fps variable rate; `fps=30:flags=lanczos+full_chroma_int`
-    // is a better-quality interpolation than bare fps=30 (which just duplicates frames)
-    // and significantly cheaper than minterpolate (which can take 5-10x longer).
+    // Re-encode preserving wall-clock time. Playwright's recordVideo produces a
+    // variable-rate WebM whose PTS timeline is correct but sparse. `fps=30` as a
+    // filter was previously compressing content (fast-forward effect); using
+    // `-fps_mode cfr -r 30` tells FFmpeg to synthesize 30fps constant-rate output
+    // while respecting the source PTS — duration stays identical to real time.
     const recordingMp4 = path.join(outputDir, 'recording.mp4')
     await spawnFfmpegLocal(
       getFfmpegPath(),
       [
         '-i', toFfPath(webmPath),
-        '-vf', 'fps=30:round=near,scale=1920:1080:flags=lanczos',
+        '-vf', 'scale=1920:1080:flags=lanczos',
         '-c:v', 'libx264', '-preset', 'medium', '-crf', '20',
         '-pix_fmt', 'yuv420p',
+        '-fps_mode', 'cfr',
+        '-r', '30',
         '-g', '30',
+        '-video_track_timescale', '30000',
         '-y', toFfPath(recordingMp4),
       ],
       300_000
@@ -834,6 +909,11 @@ export async function recordProduct(
 /**
  * Runs per-page vision planning and executes returned steps. Returns the updated
  * scene index so the caller can continue numbering.
+ *
+ * Actions execute in order on the live page. If one of the clicks navigates to
+ * a new URL mid-plan, subsequent actions execute against the new page (which is
+ * usually fine for the final nav step but becomes noise for anything after).
+ * To keep plans coherent, we stop executing the plan as soon as the URL changes.
  */
 async function playPageInteractions(
   page: Page,
@@ -842,22 +922,31 @@ async function playPageInteractions(
   productUrl: string,
   ctx: StepContext,
   sceneIdx: number,
-  scenes: SceneCapture[]
+  scenes: SceneCapture[],
+  allowNavigation: boolean = true,
 ): Promise<number> {
   try {
+    const startUrl = page.url()
     const screenshot = await page.screenshot({ type: 'jpeg', quality: 60 })
     const pageSteps = await planPageInteractions(
       screenshot.toString('base64'),
-      page.url(),
+      startUrl,
       understanding.product_name,
       understanding,
       visitedUrls,
+      allowNavigation,
     )
     for (const pageStep of pageSteps) {
       sceneIdx++
       logger.info(`recorder: in-page step ${sceneIdx} — ${pageStep.action}: ${pageStep.description}`)
       const scene = await executeAndCapture(page, pageStep, sceneIdx, productUrl, ctx)
       scenes.push(scene)
+      // Stop the plan once the URL changes — remaining steps were planned
+      // against the previous page's screenshot and won't match what's visible now.
+      if (page.url() !== startUrl) {
+        logger.info(`recorder: URL changed mid-plan, stopping remaining steps for this page`)
+        break
+      }
     }
   } catch (err) {
     logger.warn('recorder: in-page vision planning failed', { err })

@@ -426,56 +426,69 @@ RULES:
 }
 
 /**
- * Uses Gemini Vision to decide 2-4 in-page interactions (click/scroll/type)
- * for the page currently shown on screen. Called once per page after navigation,
- * so the video has something to show beyond just the address bar changing.
+ * Uses Gemini Vision to decide 3-6 actions for the page currently on screen.
  *
- * Navigation is handled separately from scraped URLs — this function never
- * emits "navigate" actions, only what to do while staying on the current page.
+ * Architecture: click-driven navigation only. This function plans both in-page
+ * interactions AND (optionally) one exit click on a visible nav link. It never
+ * emits a "navigate" action with a guessed URL — the only way to reach a new
+ * page is to click a link that Gemini sees in the screenshot.
+ *
+ * The plan should demonstrate the current page FIRST (scroll, click feature
+ * cards, type in visible fields) before any navigation, so each page has
+ * meaningful content in the final video.
  *
  * @param screenshotBase64 - JPEG screenshot of the current page as base64
  * @param pageUrl - Current URL (for context only)
  * @param productName - Product name for narration
  * @param understanding - Text understanding (for feature/audience context)
  * @param visitedUrls - URLs already visited this session — Gemini avoids linking back
+ * @param allowNavigation - When false, the final plan must not include any click that leaves the page
  */
 export async function planPageInteractions(
   screenshotBase64: string,
   pageUrl: string,
   productName: string,
   understanding: ProductUnderstanding,
-  visitedUrls: string[]
+  visitedUrls: string[],
+  allowNavigation: boolean = true,
 ): Promise<DemoStep[]> {
   const visitedList = visitedUrls.length > 0
-    ? `\nAlready visited (don't click links back to these): ${visitedUrls.slice(-5).join(', ')}`
+    ? `\nAlready visited (don't click links that go back to these): ${visitedUrls.slice(-5).join(', ')}`
     : ''
 
-  const prompt = `You are directing a professional SaaS startup demo video. Look at this live screenshot of a page currently being recorded.
+  const navRule = allowNavigation
+    ? `6. You MAY include ONE final click on a visible nav link or CTA that leads to a different page — but ONLY after 2+ in-page interactions. This is how the video discovers subpages. Pick the most demo-worthy visible link (e.g. "Product", "Features", "Pricing", "Dashboard", "Try it", "Get started"). Skip links that go to already-visited URLs.`
+    : `6. Do NOT click any link that navigates away from this page. Every action must keep the viewer on the current URL.`
+
+  const prompt = `You are directing a professional SaaS startup demo video. Look at this live screenshot.
 
 Product: ${productName}
 Current URL: ${pageUrl}
 Key features to highlight: ${understanding.top_5_features.slice(0, 5).join(', ')}${visitedList}
 
-Generate 2-4 in-page actions that demonstrate what's on THIS page. The viewer has just landed here — show them what's interesting, then stop.
+Generate 3-6 actions that demonstrate what's actually visible on THIS page, then optionally navigate to the next page by clicking a visible link.
 
-STRATEGY:
-- Marketing page: scroll once to reveal more content, then click an interesting CTA or demo button (not a nav link to another page).
-- Product/feature page: click into a feature card or tab to reveal detail, type a realistic query if there's a search field.
-- Dashboard/app: click a sidebar item or tab to open a section, click a row to open details.
+STRATEGY per page type:
+- Marketing/landing page: scroll to reveal more, hover/click a feature card to show detail, type in any visible search/demo field, THEN optionally click a nav link.
+- Feature or product page: click into feature cards or tabs to show depth, type a realistic query if a demo field is visible, THEN optionally navigate on.
+- Dashboard/app (authed): click a sidebar item, open a row or tab, type in a real input field to show the product in action.
 
 CRITICAL RULES:
-1. ONLY generate "click", "scroll_down", "scroll_up", "type", or "wait" actions. NEVER "navigate" — navigation is handled separately.
-2. Do NOT click top-nav links that just go to another page (Features / Pricing / Docs etc.) — those pages are already on the itinerary. Click in-page content instead.
-3. For "click": element_to_click must be the EXACT visible text from the screenshot, character-for-character.
-4. For "type": element_to_click is the field label/placeholder; type_text is realistic example text.
-5. Never click login / signup / register / auth / password links.
-6. Max 1 scroll. Most steps should be click or type — they're more visually interesting.
-7. Each narration: 1 vivid sentence describing what the viewer sees, naming "${productName}" when natural.
+1. ONLY use "click", "scroll_down", "scroll_up", "type", or "hover" actions. NEVER "navigate" (the system handles navigation by clicking links you identify).
+2. For EVERY click/type: element_to_click must be EXACT visible text from the screenshot. Read it character-for-character. Do not invent, translate, or paraphrase.
+3. Only reference elements you can actually SEE in this screenshot. If you can't see something, don't mention it.
+4. For "type": element_to_click is the visible field label or placeholder; type_text is a realistic example (e.g. "quarterly report", "acme corp").
+5. Never click login / signup / register / auth / password / logout links.
+${navRule}
+7. MINIMUM 2 in-page interactions (scroll, click feature, type) BEFORE any navigation click. A video that just jumps between pages without showing anything is useless.
+8. Each narration: 1 vivid sentence, naming "${productName}" when natural.
 
-Return ONLY valid JSON (no markdown, no explanation):
+Return ONLY valid JSON (no markdown):
 {"steps": [
-  {"step": 1, "action": "scroll_down", "description": "Reveal the product screenshots", "narration": "${productName} shines once you see it in action."},
-  {"step": 2, "action": "click", "description": "Open the first feature card", "narration": "Here's how ${productName} handles your most common workflow.", "element_to_click": "Automated workflows"}
+  {"step": 1, "action": "scroll_down", "description": "Reveal the product showcase below the hero", "narration": "${productName} is designed to feel immediate."},
+  {"step": 2, "action": "click", "description": "Open the automation feature card", "narration": "Here's how ${productName} automates the workflow.", "element_to_click": "Automated workflows"},
+  {"step": 3, "action": "type", "description": "Try a realistic search query", "narration": "Finding anything takes seconds.", "element_to_click": "Search", "type_text": "quarterly revenue"},
+  {"step": 4, "action": "click", "description": "Navigate to the pricing page via the top nav", "narration": "And the pricing is as simple as the product.", "element_to_click": "Pricing"}
 ]}`
 
   const visionModels = ['gemini-2.5-flash', 'gemini-1.5-flash']
