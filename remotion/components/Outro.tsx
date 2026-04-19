@@ -1,10 +1,6 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } from 'remotion';
-
-interface OutroProps {
-  productName: string;
-  productUrl?: string;
-}
+import type { OutroProps } from '../../types';
 
 export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
   const frame = useCurrentFrame();
@@ -19,7 +15,7 @@ export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
   const ctaProgress = spring({
     frame: frame - 10,
     fps,
-    config: { damping: 14, stiffness: 100 },
+    config: { damping: 10, stiffness: 100, mass: 0.75 },
   });
   const ctaY = interpolate(ctaProgress, [0, 1], [50, 0]);
   const ctaOpacity = interpolate(ctaProgress, [0, 1], [0, 1]);
@@ -28,7 +24,7 @@ export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
   const tagProgress = spring({
     frame: frame - 25,
     fps,
-    config: { damping: 14, stiffness: 100 },
+    config: { damping: 10, stiffness: 100, mass: 0.75 },
   });
   const tagY = interpolate(tagProgress, [0, 1], [30, 0]);
   const tagOpacity = interpolate(tagProgress, [0, 1], [0, 1]);
@@ -60,13 +56,14 @@ export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
         {/* Product name */}
         <p style={{
           color: 'white',
-          fontSize: 52,
+          fontSize: 64,
           margin: 0,
-          fontFamily: 'system-ui',
-          fontWeight: 600,
-          letterSpacing: '-0.02em',
+          fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+          fontWeight: 900,
+          letterSpacing: '-0.03em',
           transform: `translateY(${ctaY}px)`,
           opacity: ctaOpacity,
+          textShadow: '0 6px 28px rgba(99, 102, 241, 0.35)',
         }}>
           Try {productName} today
         </p>
@@ -86,7 +83,7 @@ export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
           color: '#8888aa',
           fontSize: 28,
           margin: 0,
-          fontFamily: 'system-ui',
+          fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
           fontWeight: 300,
           transform: `translateY(${tagY}px)`,
           opacity: tagOpacity,

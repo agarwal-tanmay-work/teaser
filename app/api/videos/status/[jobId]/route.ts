@@ -4,6 +4,12 @@ import { createServerClient as createSSRClient } from '@supabase/ssr'
 import { logger } from '@/lib/logger'
 import type { ApiResponse, VideoJob } from '@/types'
 
+// Progress polls must never be cached — the worker updates the row every few
+// seconds and the UI needs to see each change in real time.
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+export const fetchCache = 'force-no-store'
+
 /**
  * Creates an authenticated Supabase client using request cookies.
  */

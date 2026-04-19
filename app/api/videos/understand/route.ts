@@ -34,8 +34,11 @@ export async function POST(
     const { product_url, description, video_length } = parsed.data
 
     let scrapedContent: string
+    let siteMap: string[] = []
     try {
-      scrapedContent = await crawlSite(product_url)
+      const crawlResult = await crawlSite(product_url)
+      scrapedContent = crawlResult.content
+      siteMap = crawlResult.siteMap
     } catch (error) {
       logger.error('videos/understand: crawl failed', { product_url, error })
       return NextResponse.json(
@@ -50,7 +53,7 @@ export async function POST(
 
     let understanding: ProductUnderstanding
     try {
-      understanding = await understandProduct(product_url, scrapedContent, description, video_length)
+      understanding = await understandProduct(product_url, scrapedContent, description, video_length, undefined, siteMap)
     } catch (error) {
       logger.error('videos/understand: Gemini analysis failed', { product_url, error })
       return NextResponse.json(

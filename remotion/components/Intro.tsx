@@ -1,10 +1,6 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } from 'remotion';
-
-interface IntroProps {
-  productName: string;
-  tagline: string;
-}
+import type { IntroProps } from '../../types';
 
 export const Intro: React.FC<IntroProps> = ({ productName, tagline }) => {
   const frame = useCurrentFrame();
@@ -19,7 +15,7 @@ export const Intro: React.FC<IntroProps> = ({ productName, tagline }) => {
   const nameProgress = spring({
     frame: frame - 8,
     fps,
-    config: { damping: 15, stiffness: 80, mass: 0.8 },
+    config: { damping: 10, stiffness: 90, mass: 0.75 },
   });
   const nameY = interpolate(nameProgress, [0, 1], [60, 0]);
   const nameOpacity = interpolate(nameProgress, [0, 1], [0, 1]);
@@ -28,7 +24,7 @@ export const Intro: React.FC<IntroProps> = ({ productName, tagline }) => {
   const taglineProgress = spring({
     frame: frame - 22,
     fps,
-    config: { damping: 15, stiffness: 80, mass: 0.8 },
+    config: { damping: 10, stiffness: 90, mass: 0.75 },
   });
   const taglineY = interpolate(taglineProgress, [0, 1], [40, 0]);
   const taglineOpacity = interpolate(taglineProgress, [0, 1], [0, 1]);
@@ -49,13 +45,14 @@ export const Intro: React.FC<IntroProps> = ({ productName, tagline }) => {
       <div style={{ textAlign: 'center' }}>
         <h1 style={{
           color: 'white',
-          fontSize: 92,
+          fontSize: 104,
           margin: 0,
-          fontWeight: 700,
-          fontFamily: 'system-ui',
-          letterSpacing: '-0.04em',
+          fontWeight: 900,
+          fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+          letterSpacing: '-0.045em',
           transform: `translateY(${nameY}px)`,
           opacity: nameOpacity,
+          textShadow: '0 8px 40px rgba(99, 102, 241, 0.35)',
         }}>
           {productName}
         </h1>
@@ -73,7 +70,7 @@ export const Intro: React.FC<IntroProps> = ({ productName, tagline }) => {
           color: '#b0b0cc',
           fontSize: 34,
           margin: 0,
-          fontFamily: 'system-ui',
+          fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
           fontWeight: 300,
           letterSpacing: '0.01em',
           transform: `translateY(${taglineY}px)`,

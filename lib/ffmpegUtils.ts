@@ -34,3 +34,28 @@ export async function validateFfmpeg(): Promise<void> {
     })
   })
 }
+
+/**
+ * Returns the duration of a media file in milliseconds, using ffprobe.
+ * Returns null if ffprobe is unavailable or the file can't be probed.
+ */
+export async function ffprobeDurationMs(inputPath: string): Promise<number | null> {
+  const binary = getFfprobePath()
+  return new Promise((resolve) => {
+    const p = spawn(binary, [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      inputPath,
+    ])
+    let stdout = ''
+    p.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
+    p.on('error', () => resolve(null))
+    p.on('close', (code) => {
+      if (code !== 0) return resolve(null)
+      const seconds = parseFloat(stdout.trim())
+      if (!Number.isFinite(seconds) || seconds <= 0) return resolve(null)
+      resolve(Math.round(seconds * 1000))
+    })
+  })
+}

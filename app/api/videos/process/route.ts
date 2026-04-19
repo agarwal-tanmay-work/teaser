@@ -82,6 +82,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     jobId,
     product_url: job.product_url as string,
     description: job.product_description as string | undefined,
+    features: job.features_to_highlight as string | undefined,
     video_length: job.video_length as 30 | 60 | 90,
     tone: job.tone as 'professional' | 'conversational' | 'energetic',
     credentials,

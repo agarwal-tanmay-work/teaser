@@ -46,6 +46,7 @@ interface WorkerJobData {
 
 /**
  * Updates the progress, message, and status of a video job in Supabase.
+ * Logs every write so we can confirm the frontend should be seeing the change.
  */
 async function updateProgress(
   jobId: string,
@@ -59,6 +60,8 @@ async function updateProgress(
     .eq('id', jobId)
   if (error) {
     logger.warn(`updateProgress [${jobId}]: supabase update failed`, { error: error.message })
+  } else {
+    logger.info(`progress [${jobId}]: ${progress}% — ${message}`)
   }
 }
 
@@ -76,7 +79,7 @@ async function updateProgress(
 const _redisConn = buildRedisConnection()
 
 export async function processJob(jobData: WorkerJobData) {
-  const { jobId, product_url, description, tone, video_length, credentials, start_url } = jobData
+  const { jobId, product_url, description, features, tone, video_length, credentials, start_url } = jobData
   const supabase = createServiceClient()
 
   logger.info(`videoProcessor: job ${jobId} starting${start_url ? ` (demo start URL: ${start_url})` : ''}`)
@@ -96,11 +99,13 @@ export async function processJob(jobData: WorkerJobData) {
     // ─── STAGE 1: Product Understanding (0 → 15%) ─────────────────────────
     await updateProgress(jobId, 5, 'Analyzing your product...')
 
-    const scrapedContent = await crawlSite(product_url, async (msg) => {
+    const { content: scrapedContent, siteMap } = await crawlSite(product_url, async (msg) => {
       await updateProgress(jobId, 5, msg)
     })
 
-    const understanding = await understandProduct(product_url, scrapedContent, description, video_length)
+    logger.info(`videoProcessor: ${jobId} — site map: ${siteMap.length} URLs discovered`)
+
+    const understanding = await understandProduct(product_url, scrapedContent, description, video_length, features, siteMap)
 
     await supabase
       .from('video_jobs')
@@ -129,7 +134,8 @@ export async function processJob(jobData: WorkerJobData) {
       understanding,
       jobId,
       credentials,
-      start_url
+      start_url,
+      siteMap,
     )
 
     await updateProgress(jobId, 60, 'Demo recorded. Composing your video...')

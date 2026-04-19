@@ -35,17 +35,31 @@ export interface VideoClip {
   end: number
 }
 
+/** Per-word timing info for karaoke-style caption reveal */
+export interface WordTiming {
+  word: string
+  startMs: number
+  endMs: number
+  emphasis?: boolean
+}
+
 /** A captured scene from the screenshot-based recorder */
 export interface SceneCapture {
   step: number
   action: DemoAction
   description: string
+  /**
+   * Narration text. Supports `**word**` markup for per-word emphasis
+   * — rendered amber + slight scale boost in karaoke captions.
+   */
   narration: string
   clips: VideoClip[]
   targetElement: ElementBox | null
   typeText: string | null
   elementNotFound: boolean
   pageUrl: string
+  /** Optional pre-computed word timings. When absent, captions distribute words evenly. */
+  wordTimings?: WordTiming[]
 }
 
 /** Manifest output from the browser recorder */
@@ -196,4 +210,34 @@ export interface WaitlistJoinResponse {
 /** Response returned after creating a video job */
 export interface VideoCreateResponse {
   job_id: string
+}
+
+/**
+ * Props for the Remotion `TeaserVideo` master composition.
+ * Index signature satisfies Remotion's `Props extends Record<string, unknown>`
+ * constraint on `<Composition>` without widening the named fields.
+ */
+export interface TeaserVideoProps {
+  scenes: SceneCapture[]
+  recordedVideoUrl?: string
+  voiceoverUrl?: string
+  musicUrl?: string
+  productName: string
+  tagline: string
+  productUrl: string
+  [key: string]: unknown
+}
+
+/** Props for the Remotion `Intro` composition (animated product card, 3 s). */
+export interface IntroProps {
+  productName: string
+  tagline: string
+  [key: string]: unknown
+}
+
+/** Props for the Remotion `Outro` composition (CTA card, 4 s). */
+export interface OutroProps {
+  productName: string
+  productUrl?: string
+  [key: string]: unknown
 }

@@ -10,10 +10,10 @@ const CreateVideoSchema = z.object({
     .string()
     .url('Please enter a valid URL.')
     .refine((url) => url.startsWith('https://') || url.startsWith('http://'), 'URL must start with http:// or https://'),
-  description: z.string().max(300).optional(),
+  description: z.string().max(10000).optional(),
   video_length: z.union([z.literal(30), z.literal(60), z.literal(90)]),
   tone: z.enum(['professional', 'conversational', 'energetic']),
-  features: z.string().max(500).optional(),
+  features: z.string().max(10000).optional(),
 })
 
 /**

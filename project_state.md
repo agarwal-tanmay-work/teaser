@@ -1,6 +1,17 @@
 # Teaser — Project State
-Last updated: 2026-04-17
-Status: VIDEO PIPELINE — CORE FIX (Phase 13)
+Last updated: 2026-04-19
+Status: BEAT-DEMOSMITH QUALITY OVERHAUL — Phases A–D shipped (Phase 15)
+
+Phase 15 — Video Quality Overhaul (2026-04-19):
+- Phase A — Captions: killed FFmpeg drawtext captions; new remotion/components/KaraokeCaptions.tsx renders word-level karaoke (Inter 900 / 60px, amber `#FACC15` active word, glow, spring reveal, backdrop-blur pill, `**word**` emphasis markup support)
+- Phase B — Recording polish (workers/browserRecorder.ts): cubic-bezier cursor easing with arc paths, hover-before-click with per-click ripple, adaptive dark-outer/white-inner ripple, networkidle-capped dynamic post-action waits, RAF smooth scroll, 30–60ms jittered typing, auto-dismiss popups via role-based selectors + expanded POPUP_HIDE_CSS, `scrollIntoViewIfNeeded` before click, vision fallback now emits 3-step scroll sequence (never dead-stares)
+- Phase C — Assembly (workers/videoAssembler.ts + remotion/TeaserVideo.tsx): Remotion owns entire master composition — intro, per-clip motion, karaoke captions, outro, music bed, progress bar all rendered in ONE pass. FFmpeg only color-grades raw recording (saturation 0.94, contrast 1.07, cool tilt). Dropped 1600×900 chrome inset for full 1920×1080 immersive. New remotion/components/ClipMotion.tsx: click-zoom 1.0→1.12 with transformOrigin at element coords for lead clips, Ken Burns elsewhere. Crossfaded intro→demo→outro. Background music (`public/audio/bg-music.mp3` auto-detected) with time-varying volume envelope. CRF 18 / AAC 192k.
+- Phase D — Script & narrative engineering (lib/gemini.ts + lib/firecrawl.ts): SCRIPT_SYSTEM_PROMPT rewritten for PH narrative arc (HOOK → PROBLEM → PRODUCT IN ACTION → PROOF → CTA) with banned-phrase list ("unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", etc.). Caption craft rules enforce 6–14 word sentences, present tense, `**word**` emphasis markup (1–2 per segment). Firecrawl now targets /customers, /case-studies, /testimonials, /reviews, /stories, /showcase, /integrations for social-proof depth. CHARS_PER_PAGE lifted 6k→10k, MAX_PAGES 6→8, gemini scrapedContent slice lifted 20k→40k.
+- Removed dead code: remotion/components/Subtitles.tsx, remotion/components/Cursor.tsx
+- Types: added WordTiming + TeaserVideoProps/IntroProps/OutroProps with index signatures to satisfy Remotion composition generic
+- Verified: `npx tsc --noEmit` clean, `next build` clean (14/14 static pages)
+
+Prior status header: VIDEO PIPELINE — FAST-FORWARD + STALL FIX (Phase 14)
 
 What Is Built:
 - Phase 1: Next.js 16 + TypeScript strict + Tailwind + all dependencies installed
@@ -78,10 +89,25 @@ Phase 13 Changes:
 Not Yet Done (deferred):
 - Phase C (Stagehand) — larger architectural change, defer until Phase B/D verified in production.
 
+Phase 14 Changes (Fast-forward + stall fix):
+- browserRecorder: REPLACED Playwright recordVideo with CDP Page.startScreencast.
+  Each frame is stamped server-side with Date.now(), and we assemble the MP4 via
+  FFmpeg concat demuxer using explicit per-frame durations. Fully eliminates the
+  fast-forward effect since the MP4 timeline is built from wall-clock directly,
+  not Chromium's internal WebM PTS.
+- browserRecorder: added master 5min wall-clock budget around the record loop
+  with per-iteration heartbeat log. Prevents indefinite hangs mid-recording.
+- browserRecorder: added click ripple effect to CURSOR_SCRIPT — expanding green
+  circle on mousedown, standard polish in pro product launch videos.
+- videoAssembler: concat now always re-encodes (preset medium / crf 20, cfr 30,
+  matching timescale). Stream-copy was freezing mid-playback when Remotion intro
+  SPS didn't match our libx264 clip SPS.
+- Earlier setpts/ffprobe time-stretch hack removed — obsolete under CDP path.
+
 Next Actions:
-1. Run pnpm dev + check worker.log after submitting a job
-2. Verify final MP4 opens with animated intro, closes with animated outro (not static text)
-3. Verify Remotion bundle is cached across jobs (second job ~1s overhead, not 20s)
+1. E2E test: submit a job, verify playback is 1x (not fast-forwarded), scrubs cleanly
+2. Verify click ripples appear in the final MP4 at every click
+3. Confirm master timeout breaks gracefully if Gemini flakes
 4. Decide on Phase C (Stagehand) rollout
 
 Architecture Decisions Made:

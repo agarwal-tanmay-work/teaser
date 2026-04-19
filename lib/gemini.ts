@@ -183,19 +183,36 @@ ALLOWED ACTIONS:
 
 // ─── SYSTEM PROMPT: Video Script Generation ──────────────────────────────────
 
-const SCRIPT_SYSTEM_PROMPT = `You are a professional video script writer for SaaS startup demo videos. Given a product understanding with its demo flow, generate a timed video script.
+const SCRIPT_SYSTEM_PROMPT = `You are a top-tier scriptwriter for Product Hunt launch videos. You write the on-screen captions for 60–90-second silent-friendly demo videos that the viewer WATCHES, not listens to — every line appears as bold karaoke-style captions while the product is shown.
 
-CRITICAL RULES:
+YOUR JOB: Turn a product understanding + demo flow into punchy, concrete, specific caption copy that makes a scroller stop scrolling.
+
+━━━ NON-NEGOTIABLE NARRATIVE ARC ━━━
+Segment 1 (0-3s): HOOK. A provocative question, a bold claim, or a "what if" framing. Must create a pattern-break in the first 2 seconds. Examples that work: "Your team wastes 3 hours a week on status updates." "What if writing SQL felt like talking?" NEVER open with "Introducing X" or "Meet X".
+Segments 2-3: PROBLEM. Name the specific pain with concrete data or a vivid scene. Not "teams struggle with productivity" — "47% of a dev's week is meetings about meetings."
+Segments 4 through (N-2): PRODUCT IN ACTION. One feature per segment, each line sells the OUTCOME not the feature. "Drag a Figma frame in. Ship a component." beats "Figma integration available." Reference real capabilities from the scraped content.
+Segment N-1: PROOF or CATEGORY STATEMENT. Specific customer type, number, or outcome. "Shipping at 40 teams including Linear and Arc." or "This replaces 4 tools in your stack."
+Segment N (last 2-3s): CTA. Short, urgent, directive. "Try it free — link below." or "Built for teams. Yours today."
+
+━━━ BANNED PHRASES (reject every one of these) ━━━
+"unlock productivity" · "streamline your workflow" · "powerful platform" · "seamless experience" · "revolutionary" · "game-changing" · "next-generation" · "cutting-edge" · "best-in-class" · "world-class" · "robust solution" · "empowers teams" · "takes it to the next level" · "unleash the power" · "supercharge" · "effortlessly" · "at your fingertips" · "the future of X" · "one-stop-shop" · "AI-powered" (unless the product genuinely is — and even then, say what the AI DOES, not that it exists)
+
+If your draft contains any of these, REWRITE it with a specific, concrete claim drawn from the scraped product content.
+
+━━━ CAPTION CRAFT RULES ━━━
+- Each narration is ONE sentence, 6–14 words. Short. Declarative. Scanable in 2 seconds.
+- Write in present tense, active voice, second person ("your team", "you ship") or imperative ("drop a link", "hit send").
+- Numbers, names, and concrete nouns beat adjectives. "40 teams" > "many teams". "8 clicks" > "quickly".
+- Use **double asterisks** around the 1–2 words per segment that should POP. These render as amber + slight scale-up in the karaoke layer. Pick words that carry the meaning — verbs and numbers, not filler. Example: "Ship **10x** faster without **yak shaving**."
+- One emphasis pair per segment max. Don't bold entire phrases.
+- Reference the product by its actual name at least twice across the whole script (once in hook area, once in outro). Never say "this product", "this tool", "the platform".
+- Do NOT narrate what's happening on screen ("now we click here", "as you can see"). The video SHOWS that. The caption DELIVERS the value claim.
+
+━━━ TECHNICAL RULES ━━━
 1. Return valid JSON matching the exact schema below. No extra text, no markdown fences.
-2. Each segment corresponds to one demo step. The number of segments MUST match the number of demo_flow steps exactly.
-3. Each segment's narration should describe what the viewer sees on screen at that moment.
-4. Reference the product by its actual name — never say "this product" or "the tool".
-5. Use the narration from the demo_flow steps as a strong starting point, but make them flow together as a cohesive script.
-6. Timing: allocate 3-6 seconds per step. Click/type steps get 4-5s. Navigate steps get 5-6s. Scroll/wait get 3-4s.
-7. Follow this narrative arc:
-   - Opening (first 2 segments): Hook the viewer with the problem, introduce the product
-   - Middle (3-8 segments): Demonstrate key features with specific, compelling narration
-   - Closing (last 2 segments): Social proof, call to action
+2. Number of segments MUST exactly equal the number of demo_flow steps. Each segment i maps to demo_flow step i+1.
+3. Timing: allocate 3–6 seconds per step. Click/type steps get 4–5s, navigate steps get 5–6s, scroll/wait get 3–4s. Segments must be contiguous (each start_time equals the previous end_time).
+4. "what_to_show" briefly describes what's visible on screen during this segment — this is an internal hint, not shown to the viewer.
 
 OUTPUT SCHEMA (return ONLY this JSON, nothing else):
 {
@@ -204,8 +221,8 @@ OUTPUT SCHEMA (return ONLY this JSON, nothing else):
     {
       "start_time": 0,
       "end_time": 5,
-      "narration": "What the voiceover says during this segment",
-      "what_to_show": "Brief description of what is visible on screen"
+      "narration": "Ship **10x** faster without yak shaving.",
+      "what_to_show": "Hero of product landing page"
     }
   ]
 }`
@@ -345,10 +362,19 @@ export async function understandProduct(
   productUrl: string,
   scrapedContent: string,
   description?: string,
-  videoLength: number = 60
+  videoLength: number = 60,
+  features?: string,
+  siteMap: string[] = []
 ): Promise<ProductUnderstanding> {
-  const descriptionBlock = description
-    ? `\n\nADDITIONAL CONTEXT FROM THE USER:\n${description}`
+  const userContextParts: string[] = []
+  if (description) userContextParts.push(`Product description: ${description}`)
+  if (features) userContextParts.push(`Key features/flows the user specifically wants shown: ${features}`)
+  const descriptionBlock = userContextParts.length
+    ? `\n\nADDITIONAL CONTEXT FROM THE USER (prioritise these instructions):\n${userContextParts.join('\n\n')}`
+    : ''
+
+  const siteMapBlock = siteMap.length > 1
+    ? `\n\nVERIFIED SUBPAGE URLS (use ONLY these for navigate_to steps — do NOT invent URLs):\n${siteMap.slice(0, 30).map((u) => `- ${u}`).join('\n')}`
     : ''
 
   const prompt = `Analyze this product and create a comprehensive understanding + demo flow.
@@ -356,10 +382,10 @@ export async function understandProduct(
 PRODUCT URL: ${productUrl}
 
 VIDEO LENGTH: ${videoLength} seconds (plan approximately ${Math.floor(videoLength / 4)} demo steps, minimum 10)
-${descriptionBlock}
+${descriptionBlock}${siteMapBlock}
 
 SCRAPED WEBSITE CONTENT:
-${scrapedContent.slice(0, 20000)}
+${scrapedContent.slice(0, 40000)}
 
 Remember:
 - Use EXACT visible button/link text for element_to_click (copy from the scraped content)
@@ -386,7 +412,7 @@ export async function generateScript(
   tone: VideoTone,
   videoLength: VideoLength
 ): Promise<VideoScript> {
-  const prompt = `Write a ${videoLength}-second video script for the following product.
+  const prompt = `Write a ${videoLength}-second silent-friendly launch video script for the following product, following the Product Hunt narrative arc (HOOK → PROBLEM → PRODUCT IN ACTION → PROOF → CTA).
 
 PRODUCT NAME: ${understanding.product_name}
 TAGLINE: ${understanding.tagline}
@@ -397,7 +423,7 @@ PROBLEM SOLVED: ${understanding.problem_being_solved}
 PRODUCT CATEGORY: ${understanding.product_category}
 TONE: ${tone}
 
-DEMO FLOW (your script segments must match these steps 1:1):
+DEMO FLOW (your script MUST produce exactly ${understanding.demo_flow.length} segments, one per step, in this order):
 ${JSON.stringify(understanding.demo_flow.map(s => ({
     step: s.step,
     action: s.action,
@@ -405,13 +431,18 @@ ${JSON.stringify(understanding.demo_flow.map(s => ({
     narration: s.narration
   })), null, 2)}
 
-RULES:
-- Generate exactly ${understanding.demo_flow.length} segments, one per demo step
-- Total duration must be ${videoLength} seconds
-- Each segment narration should expand on the corresponding demo step's narration
-- Reference "${understanding.product_name}" by name
-- Tone: ${tone}
-- Return ONLY valid JSON, nothing else`
+REQUIREMENTS:
+- Exactly ${understanding.demo_flow.length} segments. Total duration must equal ${videoLength} seconds. Segments must be contiguous.
+- Segment 1 is the HOOK — provocative, never "Introducing ${understanding.product_name}". Grab attention in the first 2 seconds.
+- Segments 2–3 establish the PROBLEM with concrete specifics (numbers, named pain, vivid scene).
+- Middle segments show the product in action — one OUTCOME per caption, not feature lists. Draw details from the product description above (real capabilities, real names).
+- Second-to-last segment is PROOF or a category-defining claim.
+- Final segment is a short, directive CTA.
+- Each narration is ONE sentence, 6–14 words.
+- Use **double asterisks** around 1–2 emphasis words per segment (these render amber in captions). Pick verbs and numbers, not filler. Max one emphasis pair per segment.
+- Use "${understanding.product_name}" by name at least twice across the script.
+- Forbidden: "unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly", generic adjective-heavy filler. If your draft contains any, rewrite with a concrete claim from the product info above.
+- Return ONLY valid JSON, nothing else.`
 
   const text = await generateWithFallback(SCRIPT_SYSTEM_PROMPT, prompt)
   const jsonText = extractJson(text)
@@ -537,8 +568,30 @@ Return ONLY valid JSON (no markdown):
     }
   }
 
-  logger.warn('planPageInteractions: all vision models failed — no in-page actions for this page')
-  return []
+  logger.warn('planPageInteractions: all vision models failed — emitting canned scroll fallback')
+  // Canned fallback so the video never dead-stares at a static page. The
+  // narration stays generic but usable and the scroll motion keeps frames
+  // moving, which is always better than a frozen stare.
+  return [
+    {
+      step: 1,
+      action: 'scroll_down',
+      description: 'Scroll to reveal the product below the fold',
+      narration: `Here's ${productName} in action.`,
+    },
+    {
+      step: 2,
+      action: 'scroll_down',
+      description: 'Continue scrolling to surface more detail',
+      narration: `Every detail is crafted for clarity.`,
+    },
+    {
+      step: 3,
+      action: 'scroll_up',
+      description: 'Return to the top of the page',
+      narration: `Built for the way modern teams actually work.`,
+    },
+  ]
 }
 
 /**

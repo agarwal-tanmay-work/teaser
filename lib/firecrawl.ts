@@ -1,11 +1,15 @@
+import { chromium } from 'playwright'
 import { retryWithBackoff } from '@/lib/utils'
 import { logger } from '@/lib/logger'
 
 const FIRECRAWL_BASE    = 'https://api.firecrawl.dev/v1'
-const SCRAPE_TIMEOUT_MS = 20_000
-const MAP_TIMEOUT_MS    = 15_000
+const SCRAPE_TIMEOUT_MS = 15_000
+const MAP_TIMEOUT_MS    = 12_000
 const MAX_PAGES         = 8   // scrape up to this many pages per product
-const CHARS_PER_PAGE    = 6_000  // max chars kept per page before passing to Gemini
+const CHARS_PER_PAGE    = 10_000  // max chars kept per page before passing to Gemini
+const FIRECRAWL_ATTEMPTS = 2  // retry twice, then fall back to Playwright
+
+const PW_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 /**
  * Paths that are not useful for understanding a product.
@@ -58,6 +62,16 @@ const PRIORITY_PATTERNS = [
   /\/use-cases?(\/|$)/i,
   /\/why(\/|$)/i,
   /\/what-is(\/|$)/i,
+  // Social-proof pages — testimonials and case studies give the script
+  // real specificity (customer names, outcomes, numbers) instead of
+  // generic marketing hype.
+  /\/customers?(\/|$)/i,
+  /\/case-stud(y|ies)(\/|$)/i,
+  /\/testimonials?(\/|$)/i,
+  /\/reviews?(\/|$)/i,
+  /\/stories(\/|$)/i,
+  /\/showcase(\/|$)/i,
+  /\/integrations?(\/|$)/i,
 ]
 
 /**
@@ -88,8 +102,9 @@ function scoreUrl(url: string, baseUrl: string): number {
 }
 
 /**
- * Scrapes a single URL and returns its markdown content.
- * Applies a 20-second timeout and retries up to 3 times with backoff.
+ * Scrapes a single URL via Firecrawl and returns its markdown content.
+ * Short timeout + small retry count — if Firecrawl is degraded, the caller
+ * (`crawlSite`) falls back to a Playwright scrape rather than hanging.
  */
 export async function scrapeUrl(url: string): Promise<string> {
   return retryWithBackoff(async () => {
@@ -123,7 +138,148 @@ export async function scrapeUrl(url: string): Promise<string> {
     }
 
     return data.data.markdown
+  }, FIRECRAWL_ATTEMPTS)
+}
+
+/**
+ * Playwright-based fallback scraper. Works for ANY publicly accessible URL
+ * that loads in a real Chromium browser — no external API dependency.
+ *
+ * Launches a single headless browser, visits the main URL, extracts readable
+ * content + discovers same-origin links, then visits the top `maxPages - 1`
+ * most-demo-worthy links (features/pricing/product/app-ish). Returns a
+ * markdown-ish combined document in the same shape `crawlSite` emits from
+ * Firecrawl, so downstream Gemini prompts don't need to know which source
+ * produced the content.
+ */
+async function playwrightCrawl(
+  productUrl: string,
+  maxPages: number,
+  onProgress?: (message: string) => Promise<void>
+): Promise<string> {
+  logger.info(`playwrightCrawl: launching browser for ${productUrl}`)
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   })
+
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      userAgent: PW_USER_AGENT,
+    })
+    context.setDefaultTimeout(20_000)
+    context.setDefaultNavigationTimeout(25_000)
+    const page = await context.newPage()
+
+    if (onProgress) await onProgress('Loading your site in a browser...')
+
+    // Step 1: visit main URL and extract content + same-origin links
+    try {
+      await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 })
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+    } catch (err) {
+      logger.warn('playwrightCrawl: main URL goto failed', { err })
+    }
+
+    const mainExtracted = await extractPageContent(page, productUrl)
+    if (!mainExtracted) {
+      throw new Error('Could not access this URL. Please check it is publicly accessible.')
+    }
+
+    if (onProgress) await onProgress('Read main page. Exploring other pages...')
+
+    // Step 2: pick top same-origin links to visit
+    const extraSlots = Math.max(0, maxPages - 1)
+    const candidates = mainExtracted.links
+      .map((u: string) => ({ url: u, score: scoreUrl(u, productUrl) }))
+      .filter((u) => u.score >= 0 && u.url !== productUrl)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, extraSlots)
+      .map((u) => u.url)
+
+    const pages: Array<{ url: string; content: string }> = [
+      { url: productUrl, content: mainExtracted.content },
+    ]
+
+    // Step 3: visit each candidate in the same context (reuses cookies, session)
+    for (const linkUrl of candidates) {
+      try {
+        await page.goto(linkUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+        await page.waitForLoadState('networkidle', { timeout: 6_000 }).catch(() => {})
+        const extracted = await extractPageContent(page, linkUrl)
+        if (extracted && extracted.content.length > 200) {
+          pages.push({ url: linkUrl, content: extracted.content })
+          if (onProgress) await onProgress(`Read ${pages.length} pages so far...`)
+        }
+      } catch (err) {
+        logger.warn(`playwrightCrawl: failed to scrape ${linkUrl}`, { err })
+      }
+    }
+
+    logger.info(`playwrightCrawl: scraped ${pages.length} page(s) via Playwright`)
+    return pages
+      .map(({ url, content }) => `### PAGE: ${url}\n\n${content.slice(0, CHARS_PER_PAGE)}`)
+      .join('\n\n---\n\n')
+  } finally {
+    await browser.close()
+  }
+}
+
+/**
+ * Extracts readable content + same-origin links from a currently-loaded page.
+ * Returns markdown-shaped content (title, description, headings, body text)
+ * and a list of discovered links for crawling.
+ */
+async function extractPageContent(
+  page: import('playwright').Page,
+  url: string
+): Promise<{ content: string; links: string[] } | null> {
+  try {
+    const data = await page.evaluate(() => {
+      const title = document.title || ''
+      const meta =
+        (document.querySelector('meta[name="description"]') as HTMLMetaElement | null)?.content ||
+        (document.querySelector('meta[property="og:description"]') as HTMLMetaElement | null)?.content ||
+        ''
+      const h1s = Array.from(document.querySelectorAll('h1'))
+        .map((h) => (h as HTMLElement).innerText.trim())
+        .filter(Boolean)
+        .slice(0, 5)
+      const h2s = Array.from(document.querySelectorAll('h2'))
+        .map((h) => (h as HTMLElement).innerText.trim())
+        .filter(Boolean)
+        .slice(0, 12)
+      const h3s = Array.from(document.querySelectorAll('h3'))
+        .map((h) => (h as HTMLElement).innerText.trim())
+        .filter(Boolean)
+        .slice(0, 12)
+      const bodyText = ((document.body as HTMLElement | null)?.innerText ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 8_000)
+      const links = Array.from(document.querySelectorAll('a[href]'))
+        .map((a) => (a as HTMLAnchorElement).href)
+        .filter((h) => h && h.startsWith(location.origin))
+      return { title, meta, h1s, h2s, h3s, bodyText, links }
+    })
+
+    const sections: string[] = []
+    if (data.title) sections.push(`# ${data.title}`)
+    if (data.meta) sections.push(`> ${data.meta}`)
+    if (data.h1s.length) sections.push(`## Main headings\n${data.h1s.map((h) => `- ${h}`).join('\n')}`)
+    if (data.h2s.length) sections.push(`## Subheadings\n${data.h2s.map((h) => `- ${h}`).join('\n')}`)
+    if (data.h3s.length) sections.push(`## Sections\n${data.h3s.map((h) => `- ${h}`).join('\n')}`)
+    if (data.bodyText) sections.push(`## Content\n${data.bodyText}`)
+
+    return {
+      content: sections.join('\n\n'),
+      links: Array.from(new Set(data.links)).slice(0, 60),
+    }
+  } catch (err) {
+    logger.warn('extractPageContent: evaluate failed', { url, err })
+    return null
+  }
 }
 
 /**
@@ -155,6 +311,17 @@ async function mapSiteUrls(productUrl: string): Promise<string[]> {
   }
 }
 
+export interface CrawlResult {
+  /** Multi-page markdown content for Gemini to read. */
+  content: string
+  /**
+   * Every unique subpage URL discovered on the domain, scored and sorted best-first.
+   * Excludes login/auth/legal pages. These are passed to Gemini so it can reference
+   * only real, verified URLs in `navigate_to` steps — not hallucinated paths.
+   */
+  siteMap: string[]
+}
+
 /**
  * Discovers and scrapes the most important pages of a product website.
  *
@@ -163,17 +330,15 @@ async function mapSiteUrls(productUrl: string): Promise<string[]> {
  * 2. Score and rank URLs — prioritise /features, /pricing, /dashboard, etc.
  *    Skip /blog, /legal, /docs, login pages, and query-param URLs
  * 3. Scrape the top MAX_PAGES URLs in parallel
- * 4. Return all content concatenated with URL headers so Gemini knows which
- *    page each section came from and can use the real URLs in navigate_to fields
+ * 4. Return scraped content + full sorted URL list so Gemini can reference
+ *    real URLs in navigate_to steps
  *
- * Falls back to a single-page scrape if mapping fails.
- *
- * @returns Multi-page markdown content string
+ * Falls back to a single-page Playwright scrape if mapping fails.
  */
 export async function crawlSite(
   productUrl: string,
   onProgress?: (message: string) => Promise<void>
-): Promise<string> {
+): Promise<CrawlResult> {
   if (onProgress) await onProgress('Mapping website structure...')
   logger.info(`crawlSite: mapping ${productUrl}`)
 
@@ -224,18 +389,29 @@ export async function crawlSite(
   }
 
   if (pages.length === 0) {
-    if (onProgress) await onProgress('Could not retrieve any content. Retrying main URL...')
-    logger.warn('crawlSite: no pages scraped successfully, attempting main URL fallback')
-    const mainMarkdown = await scrapeUrl(mainUrl)
-    return `### PAGE: ${mainUrl}\n\n${mainMarkdown}`
+    logger.warn('crawlSite: Firecrawl returned nothing — falling back to Playwright')
+    if (onProgress) await onProgress('Scraping service degraded — using direct browser fetch...')
+    try {
+      const content = await playwrightCrawl(productUrl, MAX_PAGES, onProgress)
+      return { content, siteMap: [productUrl] }
+    } catch (err) {
+      logger.error('crawlSite: Playwright fallback also failed', { err })
+      throw new Error('Could not access this URL. Please check it is publicly accessible.')
+    }
   }
 
   logger.info(`crawlSite: successfully scraped ${pages.length}/${urlsToScrape.length} pages`)
   if (onProgress) await onProgress(`Successfully read ${pages.length} pages. Finalizing analysis...`)
 
+  // Full sorted URL list — passed to Gemini so it only references real URLs in navigate_to steps.
+  const siteMap = scored.map((u) => u.url)
+  if (!siteMap.includes(productUrl)) siteMap.unshift(productUrl)
+
+  logger.info(`crawlSite: site map — ${siteMap.length} URLs discovered`)
+
   const combined = pages
     .map(({ url, content }) => `### PAGE: ${url}\n\n${content}`)
     .join('\n\n---\n\n')
 
-  return combined
+  return { content: combined, siteMap }
 }

@@ -158,14 +158,11 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
               <div className="relative">
                 <textarea
                   value={description}
-                  onChange={(e) => setDescription(e.target.value.slice(0, 300))}
-                  placeholder="e.g. A project management tool for remote design teams"
-                  rows={3}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="e.g. A project management tool for remote design teams. Describe the product, the main flows, what you want the video to show, and anything else relevant."
+                  rows={5}
                   className="w-full px-4 py-3 bg-[#0A0A0A] border border-[#1F1F1F] rounded-md text-white placeholder:text-[#6E6E6E] focus:outline-none focus:border-white transition-colors resize-none"
                 />
-                <span className="absolute bottom-2 right-3 text-[#6E6E6E] text-xs">
-                  {description.length}/300
-                </span>
               </div>
             </div>
 
