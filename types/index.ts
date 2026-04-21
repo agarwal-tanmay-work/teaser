@@ -170,6 +170,33 @@ export interface AgentAction {
   skip_from_video?: boolean
 }
 
+/**
+ * A single interactive element discovered on the live rendered page.
+ * Used to ground Gemini's demo_flow against real DOM text instead of
+ * scraped HTML guesses.
+ */
+export interface InteractiveElement {
+  /** Visible text the recorder will match against (button/link label). */
+  text: string
+  /** DOM role, e.g. 'link' | 'button' | 'input'. */
+  role: 'link' | 'button' | 'input'
+  /** Absolute href if this is an `<a>` element, otherwise undefined. */
+  href?: string
+  /** Page URL where this element was found (the inventory spans multiple pages). */
+  foundOn: string
+}
+
+/**
+ * Aggregated reconnaissance output: every real same-origin URL and every
+ * visible click target discovered by loading the site in Playwright.
+ */
+export interface InteractiveInventory {
+  /** Same-origin URLs discovered via sitemap.xml, robots.txt, Firecrawl map, and live DOM. */
+  subpages: string[]
+  /** Clickable elements across discovered pages — the only strings Gemini is allowed to put in `element_to_click`. */
+  elements: InteractiveElement[]
+}
+
 /** Input payload for creating a new video job */
 export interface VideoJobCreateInput {
   product_url: string

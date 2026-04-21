@@ -5,6 +5,7 @@ import { spawn } from 'child_process'
 import { chromium, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import { getFfmpegPath } from '../lib/ffmpegUtils'
+import { identifyElementOnPage } from '../lib/gemini'
 import type {
   ProductUnderstanding,
   DemoStep,
@@ -349,6 +350,79 @@ async function findLocator(page: Page, selector: string | undefined, budgetMs = 
   return null
 }
 
+/**
+ * Vision-based click fallback: when text-based findLocator fails, takes a
+ * screenshot, sends it to Gemini Vision to identify the exact element text,
+ * and retries findLocator with the corrected text. If that also fails, clicks
+ * at the centre of the page as a last resort.
+ *
+ * This handles cases where Gemini's demo_flow says "Get Started" but the
+ * actual button reads "Get started" (capitalisation) or "Get Started →" (icon).
+ */
+async function visionClickFallback(
+  page: Page,
+  originalText: string,
+): Promise<{ locator: ReturnType<typeof page.locator> | null; elementBox: ElementBox | null }> {
+  try {
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 })
+    const base64 = screenshot.toString('base64')
+    const correctedText = await identifyElementOnPage(base64, originalText, page.url())
+
+    if (correctedText && correctedText !== originalText) {
+      logger.info(`visionClickFallback: "${originalText}" → "${correctedText}"`)
+      const locator = await findLocator(page, correctedText, 2000)
+      if (locator) {
+        const box = await locator.boundingBox()
+        const elementBox = box ? {
+          x: Math.round(box.x + box.width / 2),
+          y: Math.round(box.y + box.height / 2),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        } : null
+        return { locator, elementBox }
+      }
+    }
+  } catch (err) {
+    logger.warn('visionClickFallback: failed', { err })
+  }
+  return { locator: null, elementBox: null }
+}
+
+/**
+ * Extracts same-origin <a href> values from the currently loaded page and
+ * adds any new ones to the allow-list. Called after every navigation to ensure
+ * the recorder never blocks a mid-demo navigate to a freshly-discovered page.
+ */
+async function expandAllowedPaths(
+  page: Page,
+  allowedPaths: Set<string> | null,
+  productOrigin: string,
+): Promise<void> {
+  if (!allowedPaths) return
+  try {
+    const links: string[] = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('a[href]'))
+        .map((a) => (a as HTMLAnchorElement).href)
+        .filter((h) => h && h.startsWith(location.origin))
+    })
+    let added = 0
+    for (const href of links) {
+      const key = urlKey(href)
+      if (key && !allowedPaths.has(key)) {
+        try {
+          if (new URL(href).origin === productOrigin) {
+            allowedPaths.add(key)
+            added++
+          }
+        } catch { /* skip */ }
+      }
+    }
+    if (added > 0) {
+      logger.info(`expandAllowedPaths: +${added} new paths (total: ${allowedPaths.size})`)
+    }
+  } catch { /* page might be navigating */ }
+}
+
 // ─── Step execution ───────────────────────────────────────────────────────────
 
 interface StepContext {
@@ -450,8 +524,25 @@ async function captureStep(
             elementNotFound = true
           }
         } else {
-          logger.warn(`recorder step ${stepIndex}: "${step.element_to_click}" not found`)
-          elementNotFound = true
+          // Vision-based fallback: screenshot → Gemini → corrected text → retry
+          logger.info(`recorder step ${stepIndex}: "${step.element_to_click}" not found, trying vision fallback`)
+          const fallback = await visionClickFallback(page, step.element_to_click ?? '')
+          if (fallback.locator) {
+            try {
+              if (fallback.elementBox) {
+                targetElement = fallback.elementBox
+                await easedMoveTo(page, targetElement.x, targetElement.y)
+                await page.waitForTimeout(280)
+              }
+              await fallback.locator.click({ timeout: 3000, delay: 60 })
+              await postActionWait(page)
+            } catch {
+              elementNotFound = true
+            }
+          } else {
+            logger.warn(`recorder step ${stepIndex}: "${step.element_to_click}" not found even after vision fallback`)
+            elementNotFound = true
+          }
         }
         break
       }
@@ -629,6 +720,10 @@ export async function recordProduct(
     // first-contentful-paint on any site that loaded via domcontentloaded.
     await page.waitForTimeout(1200)
 
+    // Expand the allow-list with links from the live DOM right after landing.
+    // This catches SPA routes that Firecrawl/sitemap never found.
+    await expandAllowedPaths(page, allowedPaths, productOrigin)
+
     const scenes: SceneCapture[] = []
     const visitedUrls: string[] = [page.url()]
 
@@ -655,7 +750,12 @@ export async function recordProduct(
         visitedUrls.push(currentUrl)
         logger.info(`recorder: navigated to new page → ${currentUrl}`)
         await dismissPopups(page)
+        // Re-inject cursor script on new pages (SPA transitions don't always
+        // re-execute page scripts)
+        await page.addInitScript(CURSOR_SCRIPT).catch(() => {})
         await page.waitForTimeout(600)
+        // Expand the allow-list with newly discovered links on this page
+        await expandAllowedPaths(page, ctx.allowedPaths, ctx.productOrigin)
       }
     }
 

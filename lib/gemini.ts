@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment } from '@/types'
+import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment, InteractiveInventory, InteractiveElement } from '@/types'
 import { retryWithBackoff } from '@/lib/utils'
 import { logger } from '@/lib/logger'
 
@@ -108,10 +108,10 @@ const UNDERSTAND_SYSTEM_PROMPT = `You are an expert product analyst and demo vid
 
 CRITICAL RULES:
 1. Return valid JSON matching the exact schema below. No extra text, no markdown fences.
-2. For element_to_click: use the EXACT visible button/link text as it appears on the page (e.g. "Get Started", "Sign Up Free", "View Pricing"). NEVER use CSS selectors, class names, or IDs.
+2. For element_to_click: you MUST use text EXACTLY as it appears in the VERIFIED INTERACTIVE ELEMENTS list below. Pick from that list. Do NOT invent, paraphrase, or guess button/link text. If the list doesn't contain an element you want to click, DO NOT include that step.
 3. Generate 10-18 demo steps. AT LEAST 8 must be click, navigate, or type actions. MAX 2 scroll steps total — scrolls are filler, not content.
 4. The demo MUST navigate AWAY from the homepage by step 3. Show the actual product interface, not just the marketing page.
-5. MUST contain at least 4 distinct "navigate" steps, each pointing at a REAL FULL URL (starts with http:// or https://) found in the scraped content (features page, pricing, docs, dashboard, product page, blog, etc.). NEVER use in-page anchors like "#features" — they don't change the page.
+5. MUST contain at least 3 distinct "navigate" steps, each pointing at a URL from the VERIFIED SUBPAGES list below. NEVER invent URLs. NEVER use in-page anchors like "#features".
 6. NEVER include steps that navigate to login, signup, register, auth, or password-reset pages.
 7. Each step's narration must describe what the viewer sees on screen. Reference the product by its actual name.
 8. Follow this narrative arc:
@@ -119,8 +119,9 @@ CRITICAL RULES:
    - Steps 3-6: Navigate INTO the product — features page, product page, dashboard, or pricing
    - Steps 7-14: Feature demos — click through 3-5 key features, type in search/input fields, hover over elements
    - Steps 15+: Closing — pricing or CTA page, end strong
-9. For "type" actions, use realistic example text that demonstrates the product.
-10. After every navigate, include 1-2 click/scroll steps on that page before the next navigate so the viewer sees what's on each page.
+9. For "type" actions: element_to_click must be an input field label/placeholder from the VERIFIED INTERACTIVE ELEMENTS list. Use realistic example text that demonstrates the product.
+10. After every navigate, include 1-2 click/hover/scroll steps on that page before the next navigate so the viewer sees what's on each page.
+11. PREFER click-based navigation over navigate actions when a nav link exists in the verified elements. Clicking a visible link produces a more natural demo than a hard page load.
 
 OUTPUT SCHEMA (return ONLY this JSON, nothing else):
 {
@@ -173,11 +174,11 @@ OUTPUT SCHEMA (return ONLY this JSON, nothing else):
 }
 
 ALLOWED ACTIONS:
-- "navigate": Go to a URL. Requires "navigate_to" (full URL from scraped content only).
-- "click": Click a button/link. Requires "element_to_click" (exact visible text).
-- "type": Click a field and type text. Requires "element_to_click" + "type_text".
-- "hover": Hover over an element. Requires "element_to_click".
-- "scroll_down": Scroll the page down. Use sparingly (max 3 total).
+- "navigate": Go to a URL. Requires "navigate_to" (MUST be from the VERIFIED SUBPAGES list).
+- "click": Click a button/link. Requires "element_to_click" (MUST be from VERIFIED INTERACTIVE ELEMENTS).
+- "type": Click a field and type text. Requires "element_to_click" (MUST be an input from VERIFIED INTERACTIVE ELEMENTS) + "type_text".
+- "hover": Hover over an element. Requires "element_to_click" (MUST be from VERIFIED INTERACTIVE ELEMENTS).
+- "scroll_down": Scroll the page down. Use sparingly (max 2 total).
 - "scroll_up": Scroll the page up. Use sparingly.
 - "wait": Pause for 2 seconds (use only to let animations complete).`
 
@@ -364,7 +365,8 @@ export async function understandProduct(
   description?: string,
   videoLength: number = 60,
   features?: string,
-  siteMap: string[] = []
+  siteMap: string[] = [],
+  inventory?: InteractiveInventory,
 ): Promise<ProductUnderstanding> {
   const userContextParts: string[] = []
   if (description) userContextParts.push(`Product description: ${description}`)
@@ -373,25 +375,62 @@ export async function understandProduct(
     ? `\n\nADDITIONAL CONTEXT FROM THE USER (prioritise these instructions):\n${userContextParts.join('\n\n')}`
     : ''
 
-  const siteMapBlock = siteMap.length > 1
-    ? `\n\nVERIFIED SUBPAGE URLS (use ONLY these for navigate_to steps — do NOT invent URLs):\n${siteMap.slice(0, 30).map((u) => `- ${u}`).join('\n')}`
+  // Build the verified subpage URLs block — combine siteMap with inventory subpages
+  const allSubpages = new Set<string>(siteMap)
+  if (inventory) {
+    for (const sp of inventory.subpages) allSubpages.add(sp)
+  }
+  const subpageList = Array.from(allSubpages).slice(0, 40)
+  const siteMapBlock = subpageList.length > 1
+    ? `\n\nVERIFIED SUBPAGE URLS (use ONLY these for navigate_to steps — do NOT invent URLs):\n${subpageList.map((u) => `- ${u}`).join('\n')}`
     : ''
+
+  // Build the verified interactive elements block
+  let interactiveBlock = ''
+  if (inventory && inventory.elements.length > 0) {
+    const linkElements = inventory.elements
+      .filter((e) => e.role === 'link')
+      .slice(0, 50)
+      .map((e) => `  - "${e.text}"${e.href ? ` → ${e.href}` : ''}`)
+    const buttonElements = inventory.elements
+      .filter((e) => e.role === 'button')
+      .slice(0, 30)
+      .map((e) => `  - "${e.text}"`)
+    const inputElements = inventory.elements
+      .filter((e) => e.role === 'input')
+      .slice(0, 15)
+      .map((e) => `  - "${e.text}"`)
+
+    interactiveBlock = `\n\n━━━ VERIFIED INTERACTIVE ELEMENTS (use ONLY these for element_to_click) ━━━
+Navigation links (clickable, use exact text for element_to_click with action "click"):
+${linkElements.join('\n')}
+
+Buttons (clickable, use exact text):
+${buttonElements.join('\n')}
+
+Input fields (use exact placeholder/label for element_to_click with action "type"):
+${inputElements.join('\n')}
+
+⚠️ CRITICAL: Every element_to_click value in your demo_flow MUST be copied character-for-character from the lists above. If you need an element that's not listed, use a "scroll_down" or "navigate" instead — never invent element text.`
+  }
 
   const prompt = `Analyze this product and create a comprehensive understanding + demo flow.
 
 PRODUCT URL: ${productUrl}
 
 VIDEO LENGTH: ${videoLength} seconds (plan approximately ${Math.floor(videoLength / 4)} demo steps, minimum 10)
-${descriptionBlock}${siteMapBlock}
+${descriptionBlock}${siteMapBlock}${interactiveBlock}
 
 SCRAPED WEBSITE CONTENT:
 ${scrapedContent.slice(0, 40000)}
 
 Remember:
-- Use EXACT visible button/link text for element_to_click (copy from the scraped content)
-- For navigate_to: use real URLs found in the scraped content ONLY
-- Generate AT LEAST 8 click/navigate/type steps — scrolls are filler
+- For element_to_click: COPY the exact text from the VERIFIED INTERACTIVE ELEMENTS list above. Do NOT invent, paraphrase, or abbreviate.
+- For navigate_to: COPY a URL from the VERIFIED SUBPAGE URLS list above. Do NOT invent URLs.
+- PREFER clicking a navigation link (action: "click") over action: "navigate" when the link text exists in the verified elements. Clicking looks more natural in the demo.
+- Generate AT LEAST 8 click/navigate/type steps — scrolls are filler, not content
 - Navigate AWAY from homepage by step 3 into the actual product
+- Visit at least 3 different subpages to show the product depth
 - Follow the narrative arc: Hook → Into the product → Feature demos → CTA
 - Return ONLY valid JSON, nothing else`
 

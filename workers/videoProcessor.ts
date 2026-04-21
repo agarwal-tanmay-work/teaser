@@ -8,6 +8,7 @@ import path from 'path'
 import { createServiceClient } from '../lib/supabase'
 import { logger } from '../lib/logger'
 import { crawlSite } from '../lib/firecrawl'
+import { reconSite } from '../lib/recon'
 import { understandProduct, generateScript } from '../lib/gemini'
 import { recordProduct } from './browserRecorder'
 import { assembleVideo } from './videoAssembler'
@@ -105,7 +106,22 @@ export async function processJob(jobData: WorkerJobData) {
 
     logger.info(`videoProcessor: ${jobId} — site map: ${siteMap.length} URLs discovered`)
 
-    const understanding = await understandProduct(product_url, scrapedContent, description, video_length, features, siteMap)
+    // ─── Live Playwright Reconnaissance ──────────────────────────────
+    // Opens the site in a real browser, lets JS hydrate, and extracts
+    // every real link + button + input. This is the primary fix for SPAs
+    // where Firecrawl's /map endpoint returns only the root URL.
+    await updateProgress(jobId, 8, 'Scanning interactive elements...')
+    const inventory = await reconSite(product_url, async (msg) => {
+      await updateProgress(jobId, 10, msg)
+    })
+    logger.info(`videoProcessor: ${jobId} — recon: ${inventory.subpages.length} subpages, ${inventory.elements.length} interactive elements`)
+
+    // Merge siteMap with recon-discovered subpages for the widest possible
+    // navigate allow-list. Deduplicate to avoid double-counting.
+    const mergedSiteMap = Array.from(new Set([...siteMap, ...inventory.subpages]))
+    logger.info(`videoProcessor: ${jobId} — merged site map: ${mergedSiteMap.length} URLs`)
+
+    const understanding = await understandProduct(product_url, scrapedContent, description, video_length, features, mergedSiteMap, inventory)
 
     await supabase
       .from('video_jobs')
@@ -135,7 +151,7 @@ export async function processJob(jobData: WorkerJobData) {
       jobId,
       credentials,
       start_url,
-      siteMap,
+      mergedSiteMap,
     )
 
     await updateProgress(jobId, 60, 'Demo recorded. Composing your video...')
