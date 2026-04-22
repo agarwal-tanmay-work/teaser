@@ -10,7 +10,7 @@ if (!process.env.GEMINI_API_KEY) {
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
 
 /** Models tried in order. On quota exhaustion (limit: 0), skips immediately to next. */
-const MODEL_CHAIN = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash']
+const MODEL_CHAIN = ['gemini-2.5-flash-lite']
 
 function getModel(modelName: string) {
   return genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1beta' })
@@ -561,7 +561,7 @@ Return ONLY valid JSON (no markdown):
   {"step": 4, "action": "click", "description": "Navigate to the pricing page via the top nav", "narration": "And the pricing is as simple as the product.", "element_to_click": "Pricing"}
 ]}`
 
-  const visionModels = ['gemini-2.5-flash', 'gemini-1.5-flash']
+  const visionModels = ['gemini-2.5-flash-lite']
 
   for (const visionModel of visionModels) {
     try {
@@ -662,7 +662,7 @@ If you cannot find a matching element, return null.
 Return ONLY valid JSON: {"element_text": "exact text here"} or {"element_text": null}`
 
   // Vision models to try in order (skip a model instantly if its quota is exhausted)
-  const visionModels = ['gemini-2.5-flash', 'gemini-1.5-flash']
+  const visionModels = ['gemini-2.5-flash-lite']
 
   for (const visionModel of visionModels) {
     try {

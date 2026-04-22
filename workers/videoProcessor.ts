@@ -11,6 +11,15 @@ import { crawlSite } from '../lib/firecrawl'
 import { reconSite } from '../lib/recon'
 import { understandProduct, generateScript } from '../lib/gemini'
 import { recordProduct } from './browserRecorder'
+import {
+  createSkyvernTask,
+  waitForTaskCompletion,
+  downloadTaskVideo,
+  getSceneCaptures,
+  resetSceneCaptures,
+  buildNavigationGoal,
+  buildManifestFromCaptures,
+} from '../lib/skyvern'
 import { assembleVideo } from './videoAssembler'
 import type {
   ApiResponse,
@@ -89,12 +98,12 @@ export async function processJob(jobData: WorkerJobData) {
   let recordingDir = ''
   let finalVideoPath = ''
 
-  // Master timeout (30 mins)
+  // Master timeout (60 mins)
   const timeoutId = setTimeout(async () => {
-    logger.error(`videoProcessor: job ${jobId} timed out after 30 minutes`)
+    logger.error(`videoProcessor: job ${jobId} timed out after 60 minutes`)
     await supabase.from('video_jobs').update({ status: 'failed', error_message: 'Generation timed out. Please try again.' }).eq('id', jobId)
     process.exit(1)
-  }, 30 * 60 * 1000)
+  }, 60 * 60 * 1000)
 
   try {
     // ─── STAGE 1: Product Understanding (0 → 15%) ─────────────────────────
@@ -145,14 +154,51 @@ export async function processJob(jobData: WorkerJobData) {
     logger.info(`videoProcessor: ${jobId} — script generated: ${script.segments.length} segments, ${script.total_duration}s`)
 
     // ─── STAGE 3: Vision-Guided Browser Recording (35 → 60%) ───────────────
-    recordingDir = await recordProduct(
-      product_url,
-      understanding,
-      jobId,
-      credentials,
-      start_url,
-      mergedSiteMap,
-    )
+    const useSkyvern = process.env.USE_SKYVERN === 'true'
+
+    if (useSkyvern) {
+      // ── Skyvern-powered recording ─────────────────────────────────────
+      logger.info(`videoProcessor: ${jobId} — using Skyvern for recording`)
+
+      const skyvernDir = path.join(os.tmpdir(), 'teaser-recordings', jobId)
+      fs.mkdirSync(skyvernDir, { recursive: true })
+      recordingDir = skyvernDir
+
+      await resetSceneCaptures()
+      const navigationGoal = buildNavigationGoal(understanding, start_url)
+
+      await updateProgress(jobId, 38, 'AI agent navigating your product...')
+      const task = await createSkyvernTask(
+        start_url ?? product_url,
+        navigationGoal,
+        12,
+      )
+
+      await updateProgress(jobId, 42, 'AI agent exploring features...')
+      await waitForTaskCompletion(task.run_id, 45 * 60 * 1000)
+
+      await updateProgress(jobId, 52, 'Downloading recording...')
+      await downloadTaskVideo(task.run_id, path.join(skyvernDir, 'recording.mp4'))
+
+      const captures = await getSceneCaptures()
+      const manifest = buildManifestFromCaptures(captures, understanding, product_url)
+      fs.writeFileSync(
+        path.join(skyvernDir, 'manifest.json'),
+        JSON.stringify(manifest, null, 2),
+      )
+
+      logger.info(`videoProcessor: ${jobId} — Skyvern recording complete: ${captures.length} scene captures`)
+    } else {
+      // ── Legacy Playwright recording ───────────────────────────────────
+      recordingDir = await recordProduct(
+        product_url,
+        understanding,
+        jobId,
+        credentials,
+        start_url,
+        mergedSiteMap,
+      )
+    }
 
     await updateProgress(jobId, 60, 'Demo recorded. Composing your video...')
 
@@ -177,14 +223,14 @@ export async function processJob(jobData: WorkerJobData) {
 
     // ─── STAGE 5: Video Composition via Remotion (70 → 90%) ────────────────
     await updateProgress(jobId, 70, 'Composing your video (this may take a few minutes)...')
-    
+
     finalVideoPath = await assembleVideo({
       recordingDir,
       voiceoverPath,
       jobId,
       productUrl: product_url,
     })
-    
+
     await updateProgress(jobId, 85, 'Video rendered. Applying finishing touches...')
 
     await updateProgress(jobId, 90, 'Almost done. Uploading...')

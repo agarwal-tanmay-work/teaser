@@ -352,14 +352,22 @@ export async function crawlSite(
     .filter((u) => u.score >= 0)
     .sort((a, b) => b.score - a.score)
 
-  // Always include the main URL; fill remaining slots from the scored list
   const mainUrl = productUrl
   const otherUrls = scored
     .filter((u) => u.url !== mainUrl)
-    .slice(0, MAX_PAGES - 1)
     .map((u) => u.url)
 
-  const urlsToScrape = [mainUrl, ...otherUrls]
+  const normalize = (u: string) => u.replace(/\/$/, '')
+  const uniqueUrls = new Map<string, string>()
+  uniqueUrls.set(normalize(mainUrl), mainUrl)
+  
+  for (const url of otherUrls) {
+    if (!uniqueUrls.has(normalize(url))) {
+      uniqueUrls.set(normalize(url), url)
+    }
+  }
+
+  const urlsToScrape = Array.from(uniqueUrls.values()).slice(0, MAX_PAGES)
   logger.info(`crawlSite: scraping ${urlsToScrape.length} pages`, { urls: urlsToScrape })
 
   // Step 3: scrape all pages in parallel; don't let one failure block the rest

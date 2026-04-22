@@ -6,7 +6,7 @@ import { createServerClient } from '@supabase/ssr'
  * Runs on every request to refresh expired access tokens and keep auth cookies in sync.
  * Without this, server components and API routes will see stale/expired sessions.
  */
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(

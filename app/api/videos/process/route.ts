@@ -92,7 +92,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
   // ── Spawn Background Process ───────────────────────────────────────────────
   // Redirect logs to a file in the project root for diagnostics
   const logFile = path.join(process.cwd(), 'worker.log')
-  const out = fs.openSync(logFile, 'a')
+  const out = fs.openSync(logFile, 'w')
   const err = fs.openSync(logFile, 'a')
 
   const worker = spawn('npx', [

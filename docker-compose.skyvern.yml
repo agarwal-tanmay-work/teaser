@@ -1,0 +1,63 @@
+services:
+  skyvern-postgres:
+    image: postgres:14-alpine
+    restart: always
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_USER=skyvern
+      - POSTGRES_PASSWORD=skyvern
+      - POSTGRES_DB=skyvern
+    volumes:
+      - ./skyvern-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skyvern"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  skyvern:
+    build:
+      context: ./skyvern-fork
+      dockerfile: Dockerfile
+    restart: on-failure
+    ports:
+      - "8080:8000"
+      - "6080:6080"
+    env_file:
+      - .env.local
+    environment:
+      - DATABASE_STRING=postgresql+psycopg://skyvern:skyvern@skyvern-postgres:5432/skyvern
+      - BROWSER_TYPE=chromium-headful
+      - BROWSER_WIDTH=1920
+      - BROWSER_HEIGHT=1080
+      - ENABLE_GEMINI=true
+      - LLM_KEY=gemini/gemini-2.5-flash
+      - LLM_API_KEY=${GEMINI_API_KEY}
+      - ENABLE_CODE_BLOCK=true
+      - MAX_STEPS_PER_RUN=25
+      - VIDEO_PATH=/data/videos
+      - ARTIFACT_STORAGE_PATH=/data/artifacts
+      # ── Fix for WebGL-heavy sites in Docker (no GPU) ──
+      # Use SwiftShader via ANGLE for stable software WebGL rendering
+      - BROWSER_ADDITIONAL_ARGS=["--use-gl=angle","--use-angle=swiftshader-webgl","--disable-dev-shm-usage","--disable-gpu-sandbox"]
+      # Allow retries when scraping fails (default is 0 = instant failure)
+      - MAX_SCRAPING_RETRIES=2
+      # More time for GPU-stalled pages to load (default 60s)
+      - BROWSER_LOADING_TIMEOUT_MS=120000
+      # More time for screenshots on software-rendered pages (default 20s)
+      - BROWSER_SCREENSHOT_TIMEOUT_MS=60000
+      # Single screenshot per step — large React/SPA DOMs produce huge element
+      # trees; multiple screenshots push the prompt past the LLM context limit
+      - MAX_NUM_SCREENSHOTS=1
+      # Increase retries from default 5 → 8 to survive intermittent rate limits
+      - MAX_RETRIES_PER_STEP=8
+    volumes:
+      - ./skyvern-data/videos:/data/videos
+      - ./skyvern-data/artifacts:/data/artifacts
+      - ./skyvern-data/har:/data/har
+      - ./skyvern-data/log:/data/log
+      - ./skyvern-fork/skyvern/webeye/teaser_hooks.py:/app/skyvern/webeye/teaser_hooks.py
+    depends_on:
+      skyvern-postgres:
+        condition: service_healthy

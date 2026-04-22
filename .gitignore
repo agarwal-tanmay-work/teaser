@@ -43,3 +43,13 @@ next-env.d.ts
 # local logs and AI settings
 worker.log
 .claude/
+
+# Skyvern fork (managed as separate repo/submodule)
+skyvern-fork/
+skyvern-data/
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
