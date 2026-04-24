@@ -1,20 +1,26 @@
-import { GoogleGenerativeAI } from '@google/generative-ai'
 import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment, InteractiveInventory, InteractiveElement } from '@/types'
 import { retryWithBackoff } from '@/lib/utils'
 import { logger } from '@/lib/logger'
+import * as https from 'https'
 
 if (!process.env.GEMINI_API_KEY) {
-  logger.error('gemini: GEMINI_API_KEY is not set — all Gemini calls will fail')
+  logger.error('gemini: GEMINI_API_KEY is not set — all LLM calls will fail')
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? ''
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-/** Models tried in order. On quota exhaustion (limit: 0), skips immediately to next. */
-const MODEL_CHAIN = ['gemini-2.5-flash-lite']
-
-function getModel(modelName: string) {
-  return genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1beta' })
-}
+/** Models tried in order. On quota exhaustion (402) skip to next; on rate limit (429) wait and retry. */
+const MODEL_CHAIN = [
+  'gemini-3.1-flash-lite-preview',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+]
+const VISION_MODEL_CHAIN = [
+  'gemini-3.1-flash-lite-preview',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+]
 
 /**
  * Races a promise against a timeout. Rejects with a descriptive error if the timeout fires first.
@@ -29,20 +35,118 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 /**
- * Returns true when the error is a daily/monthly quota exhaustion (limit: 0).
+ * Returns true when the error is a PERMANENT quota exhaustion (402 / daily limit gone).
  * In this case retrying the same model is pointless — skip to the next model immediately.
+ * Note: 429 rate limits are NOT treated as exhaustion — they can be waited out.
  */
 function isQuotaExhausted(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
-  // Gemini surfaces "limit: 0" when the daily free-tier quota is fully used up
-  return msg.includes('limit: 0')
+  const lowerMsg = msg.toLowerCase()
+  // True exhaustion: 402 or explicit "quota" wording (daily cap)
+  if (lowerMsg.includes('402') || lowerMsg.includes('quota')) return true
+  // Exclude 429 rate limits — those are temporary and should be retried
+  return false
+}
+
+/**
+ * Returns true when the error is a 429 rate limit (temporary — can be waited out).
+ */
+function isRateLimited(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.includes('429') || msg.toLowerCase().includes('rate limit')
+}
+
+/**
+ * Parses the retry delay from a Groq 429 error. Returns ms to wait, or 35000 default.
+ */
+function parseGeminiRetryDelay(err: unknown): number {
+  return 35_000 // default 35s wait for rate limits for Gemini
+}
+
+async function httpsPost(urlStr: string, payload: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(urlStr)
+    const data = JSON.stringify(payload)
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: 443,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data)
+      },
+      timeout: 120000 // 2 minutes
+    }
+
+    const req = https.request(options, (res) => {
+      let body = ''
+      res.on('data', (chunk) => body += chunk)
+      res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`API Error: ${res.statusCode} ${res.statusMessage} - ${body}`))
+        } else {
+          try {
+            resolve(JSON.parse(body))
+          } catch (e) {
+            reject(new Error(`Invalid JSON response: ${body.substring(0, 100)}`))
+          }
+        }
+      })
+    })
+
+    req.on('error', (e) => reject(e))
+    req.on('timeout', () => {
+      req.destroy()
+      reject(new Error('Request timed out'))
+    })
+
+    req.write(data)
+    req.end()
+  })
+}
+
+async function callGemini(modelName: string, systemInstruction: string, prompt: string): Promise<string> {
+  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent?key=${GEMINI_API_KEY}`
+
+  const textPayload = systemInstruction
+    ? `SYSTEM INSTRUCTION:\n${systemInstruction}\n\nUSER PROMPT:\n${prompt}`
+    : prompt
+
+  try {
+    const data = await httpsPost(url, {
+      contents: [{
+        role: "user",
+        parts: [{ text: textPayload }]
+      }]
+    })
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  } catch (err: any) {
+    throw new Error(`Gemini API error: ${err.message}`)
+  }
+}
+
+async function callGeminiVision(modelName: string, prompt: string, screenshotBase64: string): Promise<string> {
+  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent?key=${GEMINI_API_KEY}`
+
+  try {
+    const data = await httpsPost(url, {
+      contents: [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: "image/jpeg", data: screenshotBase64 } }
+        ]
+      }]
+    })
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  } catch (err: any) {
+    throw new Error(`Gemini Vision API error: ${err.message}`)
+  }
 }
 
 /**
  * Calls Gemini with automatic model fallback and retry.
- * - On rate-limit (429, temporary): retries with backoff honoring the retry-after hint
- * - On quota exhaustion (limit: 0, daily cap hit): skips directly to next model — no retries
- * Each model attempt is wrapped with a 90-second timeout.
  */
 async function generateWithFallback(
   systemInstruction: string,
@@ -51,39 +155,42 @@ async function generateWithFallback(
   let lastError: Error | null = null
 
   for (const modelName of MODEL_CHAIN) {
-    try {
-      logger.info(`gemini: trying model ${modelName}`)
-      const result = await retryWithBackoff(
-        async () => {
-          const model = getModel(modelName)
-          const res = await withTimeout(
-            model.generateContent({
-              systemInstruction,
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            }),
-            90_000,
-            `gemini:${modelName}`
-          )
-          return res.response.text().trim()
-        },
-        3,                    // max 3 attempts per model (not 5)
-        (err) => {
-          // Skip all remaining retries for this model if daily quota is gone
-          if (isQuotaExhausted(err)) {
-            logger.warn(`gemini: ${modelName} daily quota exhausted — skipping to next model`)
-            return true // signal: abort retries
-          }
-          return false
+    // Try each model up to 3 times, with special handling for rate limits
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        logger.info(`gemini: trying model ${modelName} (attempt ${attempt + 1}/3)`)
+        const result = await withTimeout(
+          callGemini(modelName, systemInstruction, prompt),
+          90_000,
+          `gemini:${modelName}`
+        )
+        return result
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+
+        // True quota exhaustion (402 / daily cap) — skip to next model immediately
+        if (isQuotaExhausted(err)) {
+          logger.warn(`gemini: ${modelName} quota exhausted — skipping to next model`)
+          break
         }
-      )
-      return result
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err))
-      logger.warn(`gemini: model ${modelName} failed`, { error: lastError.message.slice(0, 200) })
+
+        // Rate limited (429) — wait for the retry period, then retry SAME model
+        if (isRateLimited(err)) {
+          const waitMs = parseGeminiRetryDelay(err)
+          logger.info(`gemini: ${modelName} rate limited — waiting ${Math.round(waitMs / 1000)}s before retry`)
+          await new Promise(resolve => setTimeout(resolve, waitMs))
+          continue // retry same model
+        }
+
+        // Other error — log and try next model
+        logger.warn(`gemini: model ${modelName} failed`, { error: lastError.message.slice(0, 200) })
+        break
+      }
     }
   }
+
   throw new Error(
-    `All Gemini models are unavailable (quota exhausted or API error). ` +
+    `All LLM models are unavailable (quota exhausted or API error). ` +
     `Original error: ${lastError?.message?.slice(0, 300) ?? 'unknown'}`
   )
 }
@@ -422,7 +529,7 @@ VIDEO LENGTH: ${videoLength} seconds (plan approximately ${Math.floor(videoLengt
 ${descriptionBlock}${siteMapBlock}${interactiveBlock}
 
 SCRAPED WEBSITE CONTENT:
-${scrapedContent.slice(0, 40000)}
+${scrapedContent.slice(0, 12000)}
 
 Remember:
 - For element_to_click: COPY the exact text from the VERIFIED INTERACTIVE ELEMENTS list above. Do NOT invent, paraphrase, or abbreviate.
@@ -561,27 +668,17 @@ Return ONLY valid JSON (no markdown):
   {"step": 4, "action": "click", "description": "Navigate to the pricing page via the top nav", "narration": "And the pricing is as simple as the product.", "element_to_click": "Pricing"}
 ]}`
 
-  const visionModels = ['gemini-2.5-flash-lite']
+  const visionModels = VISION_MODEL_CHAIN
 
   for (const visionModel of visionModels) {
     try {
       logger.info(`gemini: planPageInteractions via ${visionModel} for ${pageUrl}`)
-      const model = genAI.getGenerativeModel({ model: visionModel }, { apiVersion: 'v1beta' })
-      const res = await withTimeout(
-        model.generateContent({
-          contents: [{
-            role: 'user',
-            parts: [
-              { inlineData: { mimeType: 'image/jpeg', data: screenshotBase64 } },
-              { text: prompt },
-            ],
-          }],
-        }),
+
+      const text = await withTimeout(
+        callGeminiVision(visionModel, prompt, screenshotBase64),
         30_000,
         `gemini:planPageInteractions:${visionModel}`
       )
-
-      const text = res.response.text().trim()
       const jsonText = extractJson(text)
       const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
       const stepsArray = Array.isArray(raw.steps) ? raw.steps : (Array.isArray(raw) ? raw : [])
@@ -662,30 +759,19 @@ If you cannot find a matching element, return null.
 Return ONLY valid JSON: {"element_text": "exact text here"} or {"element_text": null}`
 
   // Vision models to try in order (skip a model instantly if its quota is exhausted)
-  const visionModels = ['gemini-2.5-flash-lite']
+  const visionModels = VISION_MODEL_CHAIN
 
   for (const visionModel of visionModels) {
     try {
-    const model = genAI.getGenerativeModel({ model: visionModel }, { apiVersion: 'v1beta' })
-    const res = await withTimeout(
-      model.generateContent({
-        contents: [{
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'image/jpeg', data: screenshotBase64 } },
-            { text: prompt },
-          ],
-        }],
-      }),
-      30_000,
-      `gemini-vision:${visionModel}`
-    )
-
-    const text = res.response.text().trim()
-    const jsonText = extractJson(text)
-    const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
-    const result = raw.element_text
-    return typeof result === 'string' && result.length > 0 ? result : null
+      const text = await withTimeout(
+        callGeminiVision(visionModel, prompt, screenshotBase64),
+        30_000,
+        `gemini-vision:${visionModel}`
+      )
+      const jsonText = extractJson(text)
+      const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
+      const result = raw.element_text
+      return typeof result === 'string' && result.length > 0 ? result : null
     } catch (err) {
       if (isQuotaExhausted(err)) {
         logger.warn(`identifyElementOnPage: ${visionModel} quota exhausted, trying next model`)

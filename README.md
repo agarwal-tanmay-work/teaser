@@ -39,8 +39,8 @@ Teaser is a SaaS platform that fully automates product launch video creation. A 
 | Database | Supabase (PostgreSQL + Auth + Storage) |
 | Job Queue | BullMQ + Upstash Redis |
 | Browser Automation | Playwright (headless Chromium) + CDP Screencast |
-| Vision AI | Gemini 2.5 Flash (multimodal) — per-step screenshot analysis |
-| LLM | Gemini 2.5 Flash (with 2.0 Flash fallback) |
+| Vision AI | Gemini 3.1 Flash Lite (multimodal) — per-step screenshot analysis |
+| LLM | Gemini 3.1 Flash Lite (with 2.5 Flash / 2.5 Flash Lite fallback) |
 | Web Scraping | Firecrawl API |
 | Voiceover | ElevenLabs API (tone-specific voices) |
 | Video Composition | Remotion (intro/outro, captions, clip motion, music) |
@@ -278,7 +278,8 @@ docker compose -f docker-compose.skyvern.yml down           # Stop Skyvern
 ## Architecture Decisions
 
 - **Dark-only design system** — no light mode, no external UI libraries
-- **Vision-driven recording** — at each step, Gemini Vision *sees* the actual page screenshot and decides the next action. Replaces static pre-planned step execution
+- **Vision-driven recording** — at each step, Gemini Vision *sees* the actual page screenshot and decides the next action. Replaces static pre-planned step execution. Enforces >= 2 in-page interactions per page for deep exploration.
+- **Robust Model Fallbacks** — automated model chain (3.1-flash-lite -> 2.5-flash -> 2.5-flash-lite) with auto-skip on quota exhaustion (402) and auto-retry on rate limits (429).
 - **CDP Screencast over Playwright recordVideo** — wall-clock timestamps eliminate fast-forward artifacts
 - **Remotion for composition** — one render pass produces the final video (intro, clips, captions, outro, music). FFmpeg is only used for raw recording color grading
 - **Karaoke captions** — word-level highlighting with spring animations, not FFmpeg drawtext

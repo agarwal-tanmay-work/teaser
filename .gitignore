@@ -47,6 +47,9 @@ worker.log
 # Skyvern fork (managed as separate repo/submodule)
 skyvern-fork/
 skyvern-data/
+skyvern_logs.txt
+skyvern_full_logs.txt
+skyvern_full_logs_utf8.txt
 
 # IDEs and Editors
 .vscode/

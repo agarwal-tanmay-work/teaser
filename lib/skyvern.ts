@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { logger } from './logger'
 import { retryWithBackoff } from './utils'
+import { ffprobeDurationMs } from './ffmpegUtils'
 import type { ProductUnderstanding, SceneCapture, RecordingManifest, ElementBox } from '../types'
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -94,6 +95,9 @@ export async function waitForTaskCompletion(
 ): Promise<SkyvernRunResponse> {
   const deadline = Date.now() + timeoutMs
   logger.info('skyvern: waiting for task completion', { run_id: runId, timeoutMs })
+  let lastKnownStatus = 'unknown'
+  let lastKnownFailureReason = ''
+  let lastKnownOutput = ''
 
   while (Date.now() < deadline) {
     const res = await fetch(`${SKYVERN_BASE_URL}/v1/runs/${runId}`, {
@@ -107,13 +111,25 @@ export async function waitForTaskCompletion(
 
     const data = await res.json() as SkyvernRunResponse
     const status = data.status?.toLowerCase() ?? ''
+    lastKnownStatus = status || 'unknown'
+    lastKnownFailureReason = data.failure_reason ?? ''
+    lastKnownOutput = serializeUnknown(data.output, 1200)
 
     if (status === 'completed' || status === 'finished') {
       logger.info('skyvern: task completed', { run_id: runId })
       return data
     }
     if (status === 'failed' || status === 'terminated' || status === 'timed_out') {
-      throw new Error(`Skyvern task ${runId} failed: ${data.failure_reason ?? status}`)
+      const reason = data.failure_reason ?? status
+      // "Reached the maximum steps" means Skyvern navigated and recorded
+      // successfully but ran out of step budget. The recording artifact
+      // exists and is usable — treat this as a successful completion.
+      if (reason.toLowerCase().includes('reached the maximum steps')) {
+        logger.info('skyvern: task reached max steps — treating as successful completion', { run_id: runId, steps_reason: reason })
+        return data
+      }
+      const details = formatSkyvernFailureDetails(runId, reason, data.output)
+      throw new Error(`Skyvern task ${runId} failed: ${details}`)
     }
 
     // Still running
@@ -121,7 +137,13 @@ export async function waitForTaskCompletion(
     await sleep(pollIntervalMs)
   }
 
-  throw new Error(`Skyvern task ${runId} timed out after ${timeoutMs / 1000}s`)
+  const timeoutDetails = [
+    `timed out after ${timeoutMs / 1000}s`,
+    `last_status=${lastKnownStatus}`,
+    lastKnownFailureReason ? `last_failure_reason=${lastKnownFailureReason}` : '',
+    lastKnownOutput ? `last_output=${lastKnownOutput}` : '',
+  ].filter(Boolean).join(' | ')
+  throw new Error(`Skyvern task ${runId} ${timeoutDetails}`)
 }
 
 /**
@@ -228,21 +250,27 @@ export function buildNavigationGoal(
   understanding: ProductUnderstanding,
   startUrl?: string,
 ): string {
-  const pages = understanding.key_pages_to_visit.slice(0, 4).join(', ')
-  const features = understanding.top_5_features.slice(0, 3).join('; ')
+  // Only include page URLs if they look like real discovered URLs (not hallucinated)
+  const pages = understanding.key_pages_to_visit
+    .filter((u) => u.startsWith('http'))
+    .slice(0, 4)
+    .join(', ')
 
   return [
-    `Record a product demo for "${understanding.product_name}": ${understanding.core_value_prop}`,
+    `Browse and explore the website at ${startUrl ?? 'the homepage'}.`,
     '',
     'INSTRUCTIONS:',
-    `1. Start at ${startUrl ?? 'the homepage'}, wait for full load.`,
-    `2. Visit these pages: ${pages}`,
-    `3. Interact with key features: ${features}`,
-    '4. Click buttons, hover elements, scroll to show content. Spend 3-5s per page.',
-    '5. Visit at least 3 pages/sections. Move mouse smoothly (being recorded).',
+    `1. Start at ${startUrl ?? 'the homepage'}, wait for full page load.`,
+    pages
+      ? `2. Visit these pages if reachable from visible navigation: ${pages}`
+      : '2. Visit 2-3 distinct pages that are reachable from visible navigation links.',
+    '3. Demonstrate whatever features and content are actually visible on each page. Do NOT assume or look for specific features — just interact with what you see.',
+    '4. Ground every action in what is visibly on screen. Click buttons, links, and interactive elements you can see.',
+    '5. Scroll to reveal content below the fold. Spend 3-5 seconds per page.',
+    '6. Visit at least 3 pages/sections. Move the mouse smoothly (you are being recorded).',
     '',
-    'STOP after visiting 3+ pages and 5+ interactions, or 15 actions max.',
-    'AVOID: Login/signup, external links, downloads.',
+    'COMPLETE the task after visiting 3+ pages and performing 5+ interactions.',
+    'AVOID: Login/signup pages, external links, downloads, authentication flows.',
   ].join('\n')
 }
 
@@ -285,10 +313,94 @@ export function buildManifestFromCaptures(
   }
 }
 
+/**
+ * Generates a synthetic manifest directly from a video file when
+ * scene captures metadata is unavailable. Spreads 5 scenes evenly
+ * across the video's usable duration.
+ */
+export async function buildSyntheticManifest(
+  videoPath: string,
+  understanding: ProductUnderstanding,
+  productUrl: string,
+): Promise<RecordingManifest> {
+  const durationMs = (await ffprobeDurationMs(videoPath)) || 30000 // fallback to 30s
+  
+  const sceneCount = 5
+  const sceneDurationMs = 3000
+  const usableDuration = Math.max(durationMs - sceneDurationMs, sceneDurationMs)
+  
+  const scenes: SceneCapture[] = Array.from({ length: sceneCount }).map((_, i) => {
+    // Distribute clips evenly, avoiding the very end
+    const start = Math.floor((i / Math.max(sceneCount - 1, 1)) * Math.min(usableDuration, durationMs * 0.8))
+    
+    return {
+      step: i + 1,
+      action: 'navigate',
+      description: `Exploring feature ${i + 1}`,
+      narration: `Exploring ${understanding.product_name}`,
+      clips: [{ start, end: start + sceneDurationMs }],
+      targetElement: null,
+      typeText: null,
+      elementNotFound: false,
+      pageUrl: productUrl,
+    }
+  })
+
+  return {
+    productUrl,
+    productName: understanding.product_name,
+    tagline: understanding.tagline,
+    totalScenes: scenes.length,
+    scenes,
+  }
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Produces concise failure details for Skyvern terminal task states.
+ */
+function formatSkyvernFailureDetails(runId: string, failureReason: string, output: unknown): string {
+  const normalizedReason = failureReason.trim() || 'unknown failure'
+  const category = classifySkyvernFailure(normalizedReason)
+  const outputSnippet = serializeUnknown(output, 900)
+  return [
+    `category=${category}`,
+    `reason=${normalizedReason}`,
+    outputSnippet ? `output=${outputSnippet}` : '',
+    `run_id=${runId}`,
+  ].filter(Boolean).join(' | ')
+}
+
+/**
+ * Buckets Skyvern errors to guide retries and operator debugging.
+ */
+function classifySkyvernFailure(reason: string): string {
+  const lower = reason.toLowerCase()
+  if (lower.includes('model') && lower.includes('decommission')) return 'model_decommissioned'
+  if (lower.includes('reached the maximum steps')) return 'max_steps_exceeded'
+  if (lower.includes('max retries per step') || lower.includes('context window') || lower.includes('oversized')) return 'step_generation_overload'
+  if (lower.includes('rate limit') || lower.includes('429')) return 'rate_limited'
+  if (lower.includes('timeout') || lower.includes('timed out')) return 'timeout'
+  if (lower.includes('browser') || lower.includes('playwright')) return 'browser_runtime'
+  return 'unknown'
+}
+
+/**
+ * Safe JSON serialization for logging and error context.
+ */
+function serializeUnknown(value: unknown, maxLen: number): string {
+  if (value === undefined || value === null) return ''
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value)
+    return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw
+  } catch {
+    return String(value)
+  }
 }
 
 /** Recursively find .mp4 and .webm files in a directory. */

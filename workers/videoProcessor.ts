@@ -19,6 +19,7 @@ import {
   resetSceneCaptures,
   buildNavigationGoal,
   buildManifestFromCaptures,
+  buildSyntheticManifest,
 } from '../lib/skyvern'
 import { assembleVideo } from './videoAssembler'
 import type {
@@ -164,30 +165,80 @@ export async function processJob(jobData: WorkerJobData) {
       fs.mkdirSync(skyvernDir, { recursive: true })
       recordingDir = skyvernDir
 
-      await resetSceneCaptures()
-      const navigationGoal = buildNavigationGoal(understanding, start_url)
+      const maxSkyvernAttempts = 3
+      const stepBudgets = [25, 20, 15]
+      let skyvernSucceeded = false
+      let lastSkyvernError: unknown = null
 
-      await updateProgress(jobId, 38, 'AI agent navigating your product...')
-      const task = await createSkyvernTask(
-        start_url ?? product_url,
-        navigationGoal,
-        12,
-      )
+      for (let attempt = 1; attempt <= maxSkyvernAttempts; attempt++) {
+        const maxSteps = stepBudgets[attempt - 1] ?? 15
+        const retryLabel = attempt > 1 ? ` (retry ${attempt}/${maxSkyvernAttempts})` : ''
+        try {
+          await resetSceneCaptures()
+          const navigationGoal = `${buildNavigationGoal(understanding, start_url)}
 
-      await updateProgress(jobId, 42, 'AI agent exploring features...')
-      await waitForTaskCompletion(task.run_id, 45 * 60 * 1000)
+RETRY POLICY:
+- Keep actions concise and deterministic.
+- Avoid repeatedly targeting the same element if previous attempts failed.
+- Prefer visible top-navigation links to discover 2-3 pages quickly.
+- Stop once 3 pages and 5 interactions are demonstrated.`
 
-      await updateProgress(jobId, 52, 'Downloading recording...')
-      await downloadTaskVideo(task.run_id, path.join(skyvernDir, 'recording.mp4'))
+          await updateProgress(jobId, 38, `AI agent navigating your product...${retryLabel}`)
+          const task = await createSkyvernTask(
+            start_url ?? product_url,
+            navigationGoal,
+            maxSteps,
+          )
 
-      const captures = await getSceneCaptures()
-      const manifest = buildManifestFromCaptures(captures, understanding, product_url)
-      fs.writeFileSync(
-        path.join(skyvernDir, 'manifest.json'),
-        JSON.stringify(manifest, null, 2),
-      )
+          await updateProgress(jobId, 42, `AI agent exploring features...${retryLabel}`)
+          await waitForTaskCompletion(task.run_id, 45 * 60 * 1000)
 
-      logger.info(`videoProcessor: ${jobId} — Skyvern recording complete: ${captures.length} scene captures`)
+          await updateProgress(jobId, 52, `Downloading recording...${retryLabel}`)
+          const recordingPath = path.join(skyvernDir, 'recording.mp4')
+          await downloadTaskVideo(task.run_id, recordingPath)
+
+          let captures = await getSceneCaptures()
+
+          // If scene captures endpoint returned nothing but we have a recording,
+          // generate a synthetic manifest from the video duration.
+          if (captures.length === 0 && fs.existsSync(recordingPath) && fs.statSync(recordingPath).size > 0) {
+            logger.info(`videoProcessor: ${jobId} — no scene captures from API, generating synthetic manifest from video`)
+            const manifest = await buildSyntheticManifest(recordingPath, understanding, product_url)
+            fs.writeFileSync(
+              path.join(skyvernDir, 'manifest.json'),
+              JSON.stringify(manifest, null, 2),
+            )
+            logger.info(`videoProcessor: ${jobId} — Skyvern recording complete on attempt ${attempt}: ${manifest.totalScenes} synthetic scenes`)
+            skyvernSucceeded = true
+            break
+          }
+
+          if (captures.length === 0) {
+            throw new Error(`Skyvern task ${task.run_id} produced no scene captures and no recording`)
+          }
+
+          const manifest = buildManifestFromCaptures(captures, understanding, product_url)
+          fs.writeFileSync(
+            path.join(skyvernDir, 'manifest.json'),
+            JSON.stringify(manifest, null, 2),
+          )
+
+          logger.info(`videoProcessor: ${jobId} — Skyvern recording complete on attempt ${attempt}: ${captures.length} scene captures`)
+          skyvernSucceeded = true
+          break
+        } catch (err) {
+          lastSkyvernError = err
+          logger.warn(`videoProcessor: ${jobId} — Skyvern attempt ${attempt}/${maxSkyvernAttempts} failed`, { error: err })
+          if (attempt < maxSkyvernAttempts) {
+            await updateProgress(jobId, 40, `Skyvern attempt ${attempt} failed. Retrying with safer settings...`)
+          }
+        }
+      }
+
+      if (!skyvernSucceeded) {
+        const reason = lastSkyvernError instanceof Error ? lastSkyvernError.message : String(lastSkyvernError)
+        throw new Error(`Skyvern failed after ${maxSkyvernAttempts} attempts: ${reason}`)
+      }
     } else {
       // ── Legacy Playwright recording ───────────────────────────────────
       recordingDir = await recordProduct(

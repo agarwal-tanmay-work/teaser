@@ -25,14 +25,13 @@ by fully automating the entire video creation pipeline.
 1. User pastes product URL + optional description
 2. Firecrawl scrapes the entire product website
 3. Gemini reads the scraped content and outputs a structured
-   ProductUnderstanding JSON: product name, tagline, core value
-   proposition, target audience, top 5 features to demo,
-   brand tone, key pages to visit, and a step-by-step demo
-   flow with specific actions to take in the product
-4. Playwright opens a real headless Chrome browser, follows
-   the demo flow exactly, and records the entire session as
-   a video — this is the actual product being navigated by
-   a robot, not fake AI-generated visuals
+   ProductUnderstanding JSON.
+4. A vision-driven agentic loop records the demo: Playwright
+   opens a real headless Chrome browser at 1920×1080. At each
+   step, a screenshot is sent to Gemini Vision — the AI *sees*
+   the actual page and decides the next action (click, type,
+   scroll, hover). CDP screencast captures wall-clock frames
+   for perfect 1× playback.
 5. Gemini writes a professional 60-90 second video script
    timed to match what was recorded, trained on the style
    of top ProductHunt launch videos
@@ -46,18 +45,19 @@ by fully automating the entire video creation pipeline.
 9. User downloads their professional video
 
 ## Tech Stack — Never Change Without Asking
-- Framework: Next.js 14 with App Router (TypeScript strict)
-- Styling: Tailwind CSS only. No external UI libraries ever.
+- Framework: Next.js 16 with App Router (TypeScript strict)
+- Styling: Tailwind CSS v4 only. No external UI libraries ever.
 - Database: Supabase (PostgreSQL)
 - Auth: Supabase Auth
 - Job Queue: BullMQ + Redis via Upstash
-- Browser Automation: Playwright (headless Chrome)
-- LLM: Google Gemini API (gemini-1.5-pro)
+- Browser Automation: Playwright (headless Chrome) + CDP Screencast
+- LLM: Gemini 3.1 Flash Lite (preview) with 2.5-flash fallback
 - Web Scraping: Firecrawl API
 - Voiceover: ElevenLabs API
 - Video Assembly: Remotion + FFmpeg
 - Storage: Supabase Storage
 - Package manager: pnpm always. Never npm or yarn.
+- Optional: Skyvern for alternative AI-driven navigation
 
 ## Non-Negotiable Code Rules
 - TypeScript strict mode. Zero `any` types. Ever.

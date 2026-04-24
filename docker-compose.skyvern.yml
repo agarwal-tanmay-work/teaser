@@ -31,11 +31,13 @@ services:
       - BROWSER_TYPE=chromium-headful
       - BROWSER_WIDTH=1920
       - BROWSER_HEIGHT=1080
-      - ENABLE_GEMINI=true
-      - LLM_KEY=gemini/gemini-2.5-flash
-      - LLM_API_KEY=${GEMINI_API_KEY}
+      - ENABLE_GROQ=false
+      - ENABLE_OPENAI_COMPATIBLE=true
+      - LLM_KEY=OPENAI_COMPATIBLE
+      - OPENAI_COMPATIBLE_MODEL_NAME=gemini-3.1-flash-lite-preview
+      - OPENAI_COMPATIBLE_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai/
+      - OPENAI_COMPATIBLE_SUPPORTS_VISION=true
       - ENABLE_CODE_BLOCK=true
-      - MAX_STEPS_PER_RUN=25
       - VIDEO_PATH=/data/videos
       - ARTIFACT_STORAGE_PATH=/data/artifacts
       # ── Fix for WebGL-heavy sites in Docker (no GPU) ──
@@ -47,11 +49,12 @@ services:
       - BROWSER_LOADING_TIMEOUT_MS=120000
       # More time for screenshots on software-rendered pages (default 20s)
       - BROWSER_SCREENSHOT_TIMEOUT_MS=60000
-      # Single screenshot per step — large React/SPA DOMs produce huge element
-      # trees; multiple screenshots push the prompt past the LLM context limit
+      # Keep screenshot payload minimal on large SPA pages.
       - MAX_NUM_SCREENSHOTS=1
-      # Increase retries from default 5 → 8 to survive intermittent rate limits
+      # Keep retries bounded to avoid long thrash loops per step.
       - MAX_RETRIES_PER_STEP=8
+      # Keep each task shorter/more stable for heavy React pages.
+      - MAX_STEPS_PER_RUN=25
     volumes:
       - ./skyvern-data/videos:/data/videos
       - ./skyvern-data/artifacts:/data/artifacts

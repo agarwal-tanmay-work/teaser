@@ -1,6 +1,6 @@
 # Teaser — Project State
-Last updated: 2026-04-19
-Status: BEAT-DEMOSMITH QUALITY OVERHAUL — Phases A–D shipped (Phase 15)
+Last updated: 2026-04-24
+Status: STABILITY & AGENTIC POLISH — Phase 16 shipped
 
 Phase 15 — Video Quality Overhaul (2026-04-19):
 - Phase A — Captions: killed FFmpeg drawtext captions; new remotion/components/KaraokeCaptions.tsx renders word-level karaoke (Inter 900 / 60px, amber `#FACC15` active word, glow, spring reveal, backdrop-blur pill, `**word**` emphasis markup support)
@@ -10,6 +10,14 @@ Phase 15 — Video Quality Overhaul (2026-04-19):
 - Removed dead code: remotion/components/Subtitles.tsx, remotion/components/Cursor.tsx
 - Types: added WordTiming + TeaserVideoProps/IntroProps/OutroProps with index signatures to satisfy Remotion composition generic
 - Verified: `npx tsc --noEmit` clean, `next build` clean (14/14 static pages)
+
+Phase 16 — Stability & Model Fallbacks (2026-04-24):
+- Model Chain: Primary LLM moved to `gemini-3.1-flash-lite-preview`. Added automatic fallback chain: `gemini-3.1-flash-lite-preview` -> `gemini-2.5-flash` -> `gemini-2.5-flash-lite`.
+- Quota Management: Implemented `isQuotaExhausted` (auto-skip model on 402/quota) and `isRateLimited` (auto-wait on 429).
+- Agentic Stability: `planPageInteractions` now enforces "Deep Landing Interaction" (>= 2 in-page interactions like scroll/hover/type before any navigation).
+- Vision Loop Polish: Added `allowNavigation` flag to ensure the video ends inside the product, not on a half-loaded subpage.
+- Request Layer: Dropped library dependencies for LLM calls, moved to native `https` with explicit 120s timeouts and `withTimeout` race wrapper for all model calls.
+- MAX_PAGES capped at 5 for predictable exploration depth.
 
 Prior status header: VIDEO PIPELINE — FAST-FORWARD + STALL FIX (Phase 14)
 
@@ -116,9 +124,11 @@ Architecture Decisions Made:
 - No external UI libraries
 - BullMQ + Upstash Redis for job queue (lazy singleton to avoid build-time Redis connection)
 - Playwright for browser automation at 1920×1080 (Full HD)
-- Gemini API (gemini-2.5-flash with gemini-2.0-flash fallback) as the LLM
-- Gemini Vision (gemini-2.5-flash multimodal) for per-step screenshot analysis
+- Gemini API (gemini-3.1-flash-lite-preview with 2.5-flash fallback) as the LLM
+- Gemini Vision (gemini-3.1-flash-lite-preview multimodal) for per-step screenshot analysis
 - Gemini TTS (gemini-2.5-flash-preview-tts) for voiceover generation (TTS disabled, silent for now)
+- Model Fallback Chain: 3.1-flash-lite-preview -> 2.5-flash -> 2.5-flash-lite with auto-skip on quota exhaustion
+- Native https request layer with explicit 120s timeouts and withTimeout race wrapper
 - Firecrawl for web scraping
 - fluent-ffmpeg + raw spawn for video assembly (not Remotion FFmpeg layer)
 - Two-pass framing: generate gradient PNG → overlay browser recording with drop shadow
