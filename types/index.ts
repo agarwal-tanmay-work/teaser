@@ -4,8 +4,12 @@ export type VideoJobStatus = 'pending' | 'processing' | 'completed' | 'failed'
 /** Tone style for the generated video */
 export type VideoTone = 'professional' | 'conversational' | 'energetic'
 
-/** Length of the generated video in seconds */
-export type VideoLength = 30 | 60 | 90
+/**
+ * Target length of the generated video in seconds.
+ * The UI offers 120/150/180 as presets but the recorder dynamically adjusts
+ * based on how much content the product actually has. Minimum 60, max 300.
+ */
+export type VideoLength = number
 
 /** Actions available in a demo flow step */
 export type DemoAction = 'scroll_down' | 'scroll_up' | 'click' | 'navigate' | 'wait' | 'hover' | 'type'

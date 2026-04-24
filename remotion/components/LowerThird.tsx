@@ -1,7 +1,8 @@
 import React from 'react';
 import { AbsoluteFill, spring, useCurrentFrame, useVideoConfig, interpolate } from 'remotion';
+import type { VideoScript } from '../../types';
 
-export const LowerThird: React.FC<{ script: any }> = ({ script }) => {
+export const LowerThird: React.FC<{ script: VideoScript }> = ({ script }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -11,8 +12,8 @@ export const LowerThird: React.FC<{ script: any }> = ({ script }) => {
   return (
     <>
       {script.segments
-        .filter((_: any, i: number) => i % 3 === 0)
-        .map((seg: any, i: number) => {
+        .filter((_, i) => i % 3 === 0)
+        .map((seg, i) => {
           if (!seg.what_to_show) return null;
 
           const startFrame = seg.start_time * fps;

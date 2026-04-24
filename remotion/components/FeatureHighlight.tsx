@@ -1,8 +1,9 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } from 'remotion';
+import type { VideoScript } from '../../types';
 
 interface FeatureHighlightProps {
-  script?: any;
+  script?: VideoScript;
 }
 
 export const FeatureHighlight: React.FC<FeatureHighlightProps> = ({ script }) => {
@@ -13,7 +14,7 @@ export const FeatureHighlight: React.FC<FeatureHighlightProps> = ({ script }) =>
 
   return (
     <>
-      {script.segments.map((seg: any, i: number) => {
+      {script.segments.map((seg, i) => {
         if (!seg.what_to_show) return null;
 
         const startFrame = seg.start_time * fps;

@@ -9,7 +9,8 @@ import { createServiceClient } from '../lib/supabase'
 import { logger } from '../lib/logger'
 import { crawlSite } from '../lib/firecrawl'
 import { reconSite } from '../lib/recon'
-import { understandProduct, generateScript } from '../lib/gemini'
+import { understandProduct, generateScript, polishRecordedNarrations } from '../lib/gemini'
+import { ffprobeDurationMs } from '../lib/ffmpegUtils'
 import { recordProduct } from './browserRecorder'
 import {
   createSkyvernTask,
@@ -23,9 +24,7 @@ import {
 } from '../lib/skyvern'
 import { assembleVideo } from './videoAssembler'
 import type {
-  ApiResponse,
-  ProductUnderstanding,
-  VideoScript,
+  RecordingManifest,
   VideoTone,
   VideoLength,
 } from '../types'
@@ -53,6 +52,36 @@ interface WorkerJobData {
   features?: string
   credentials?: { username: string; password: string }
   start_url?: string
+}
+
+const INTRO_OUTRO_SECONDS = 7
+const MIN_FINAL_VIDEO_SECONDS = 60
+const MAX_FINAL_VIDEO_SECONDS = 300
+
+function targetDemoDurationMs(videoLength: VideoLength): number {
+  const finalSeconds = Math.max(
+    MIN_FINAL_VIDEO_SECONDS,
+    Math.min(MAX_FINAL_VIDEO_SECONDS, videoLength),
+  )
+  return Math.max(30_000, (finalSeconds - INTRO_OUTRO_SECONDS) * 1000)
+}
+
+function manifestClipDurationMs(manifest: { scenes: Array<{ clips: Array<{ start: number; end: number }> }> }): number {
+  return manifest.scenes.reduce((total, scene) => {
+    return total + scene.clips.reduce((sceneTotal, clip) => {
+      return sceneTotal + Math.max(0, clip.end - clip.start)
+    }, 0)
+  }, 0)
+}
+
+function skyvernStepBudgets(videoLength: VideoLength): number[] {
+  const base = Math.max(30, Math.ceil(videoLength / 4))
+  return [base, Math.max(26, base - 8), Math.max(22, base - 14)]
+}
+
+function isInsufficientSkyvernFootage(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('Skyvern recording too short') || message.includes('Skyvern manifest too short')
 }
 
 /**
@@ -145,6 +174,14 @@ export async function processJob(jobData: WorkerJobData) {
     // ─── STAGE 2: Script Generation (15 → 35%) ────────────────────────────
     const script = await generateScript(understanding, tone, video_length)
 
+    // The Remotion captions are driven by the scene narrations written into
+    // the recording manifest. Keep the initial planned flow aligned with the
+    // polished script instead of the rough analysis narration.
+    for (let i = 0; i < understanding.demo_flow.length && i < script.segments.length; i++) {
+      const narration = script.segments[i]?.narration
+      if (narration) understanding.demo_flow[i].narration = narration
+    }
+
     await supabase
       .from('video_jobs')
       .update({ script })
@@ -166,7 +203,8 @@ export async function processJob(jobData: WorkerJobData) {
       recordingDir = skyvernDir
 
       const maxSkyvernAttempts = 3
-      const stepBudgets = [25, 20, 15]
+      const stepBudgets = skyvernStepBudgets(video_length)
+      const targetDemoMs = targetDemoDurationMs(video_length)
       let skyvernSucceeded = false
       let lastSkyvernError: unknown = null
 
@@ -175,13 +213,13 @@ export async function processJob(jobData: WorkerJobData) {
         const retryLabel = attempt > 1 ? ` (retry ${attempt}/${maxSkyvernAttempts})` : ''
         try {
           await resetSceneCaptures()
-          const navigationGoal = `${buildNavigationGoal(understanding, start_url)}
+          const navigationGoal = `${buildNavigationGoal(understanding, start_url, video_length)}
 
 RETRY POLICY:
 - Keep actions concise and deterministic.
 - Avoid repeatedly targeting the same element if previous attempts failed.
-- Prefer visible top-navigation links to discover 2-3 pages quickly.
-- Stop once 3 pages and 5 interactions are demonstrated.`
+- Prefer visible top-navigation links to discover new pages, then spend time demonstrating each page.
+- Do not stop early just because 3 pages or 5 interactions are complete. The target is a real ${video_length}-second demo.`
 
           await updateProgress(jobId, 38, `AI agent navigating your product...${retryLabel}`)
           const task = await createSkyvernTask(
@@ -197,38 +235,53 @@ RETRY POLICY:
           const recordingPath = path.join(skyvernDir, 'recording.mp4')
           await downloadTaskVideo(task.run_id, recordingPath)
 
-          let captures = await getSceneCaptures()
+          const captures = await getSceneCaptures()
+          const recordingDurationMs = await ffprobeDurationMs(recordingPath)
+          logger.info(
+            `videoProcessor: ${jobId} — Skyvern recording duration: ${Math.round((recordingDurationMs ?? 0) / 1000)}s`,
+          )
+
+          if (!recordingDurationMs || recordingDurationMs < targetDemoMs) {
+            throw new Error(
+              `Skyvern recording too short: ${Math.round((recordingDurationMs ?? 0) / 1000)}s recorded, ${Math.round(targetDemoMs / 1000)}s required`,
+            )
+          }
 
           // If scene captures endpoint returned nothing but we have a recording,
           // generate a synthetic manifest from the video duration.
+          let manifest: RecordingManifest
           if (captures.length === 0 && fs.existsSync(recordingPath) && fs.statSync(recordingPath).size > 0) {
             logger.info(`videoProcessor: ${jobId} — no scene captures from API, generating synthetic manifest from video`)
-            const manifest = await buildSyntheticManifest(recordingPath, understanding, product_url)
-            fs.writeFileSync(
-              path.join(skyvernDir, 'manifest.json'),
-              JSON.stringify(manifest, null, 2),
-            )
-            logger.info(`videoProcessor: ${jobId} — Skyvern recording complete on attempt ${attempt}: ${manifest.totalScenes} synthetic scenes`)
-            skyvernSucceeded = true
-            break
-          }
-
-          if (captures.length === 0) {
+            manifest = await buildSyntheticManifest(recordingPath, understanding, product_url)
+          } else if (captures.length === 0) {
             throw new Error(`Skyvern task ${task.run_id} produced no scene captures and no recording`)
+          } else {
+            manifest = buildManifestFromCaptures(captures, understanding, product_url, recordingDurationMs)
           }
 
-          const manifest = buildManifestFromCaptures(captures, understanding, product_url)
+          const manifestDurationMs = manifestClipDurationMs(manifest)
+          if (manifestDurationMs < targetDemoMs) {
+            throw new Error(
+              `Skyvern manifest too short: ${Math.round(manifestDurationMs / 1000)}s clips, ${Math.round(targetDemoMs / 1000)}s required`,
+            )
+          }
+
           fs.writeFileSync(
             path.join(skyvernDir, 'manifest.json'),
             JSON.stringify(manifest, null, 2),
           )
 
-          logger.info(`videoProcessor: ${jobId} — Skyvern recording complete on attempt ${attempt}: ${captures.length} scene captures`)
+          logger.info(
+            `videoProcessor: ${jobId} — Skyvern recording complete on attempt ${attempt}: ${manifest.totalScenes} scenes / ${Math.round(manifestDurationMs / 1000)}s clips`,
+          )
           skyvernSucceeded = true
           break
         } catch (err) {
           lastSkyvernError = err
           logger.warn(`videoProcessor: ${jobId} — Skyvern attempt ${attempt}/${maxSkyvernAttempts} failed`, { error: err })
+          if (isInsufficientSkyvernFootage(err)) {
+            break
+          }
           if (attempt < maxSkyvernAttempts) {
             await updateProgress(jobId, 40, `Skyvern attempt ${attempt} failed. Retrying with safer settings...`)
           }
@@ -237,7 +290,17 @@ RETRY POLICY:
 
       if (!skyvernSucceeded) {
         const reason = lastSkyvernError instanceof Error ? lastSkyvernError.message : String(lastSkyvernError)
-        throw new Error(`Skyvern failed after ${maxSkyvernAttempts} attempts: ${reason}`)
+        logger.warn(`videoProcessor: ${jobId} — Skyvern could not produce a full-length demo, falling back to Playwright`, { reason })
+        await updateProgress(jobId, 52, 'Skyvern produced too little footage. Switching to browser recorder...')
+        recordingDir = await recordProduct(
+          product_url,
+          understanding,
+          jobId,
+          credentials,
+          start_url,
+          mergedSiteMap,
+          video_length,
+        )
       }
     } else {
       // ── Legacy Playwright recording ───────────────────────────────────
@@ -248,10 +311,54 @@ RETRY POLICY:
         credentials,
         start_url,
         mergedSiteMap,
+        video_length,
       )
     }
 
-    await updateProgress(jobId, 60, 'Demo recorded. Composing your video...')
+    await updateProgress(jobId, 60, 'Demo recorded. Polishing captions...')
+
+    // ─── STAGE 3b: Post-Recording Narration Polish ─────────────────────────
+    // Load the manifest, rewrite narrations into a coherent arc, save back
+    {
+      const manifestPath = path.join(recordingDir, 'manifest.json')
+      if (fs.existsSync(manifestPath)) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+          scenes: Array<{ description: string; narration: string; action: string; pageUrl: string; clips: Array<{ start: number; end: number }> }>
+          [key: string]: unknown
+        }
+
+        // Hard duration guard: verify we have enough footage
+        const totalClipMs = manifest.scenes.reduce((total, scene) =>
+          total + scene.clips.reduce((st, clip) => st + Math.max(0, clip.end - clip.start), 0), 0)
+        const targetMs = targetDemoDurationMs(video_length)
+        const minAcceptableMs = Math.max(targetMs * 0.5, 40_000) // at least 40s OR 50% of target (whichever is greater)
+
+        if (totalClipMs < minAcceptableMs) {
+          logger.error(`videoProcessor: ${jobId} — insufficient footage: ${Math.round(totalClipMs / 1000)}s clips, need at least ${Math.round(minAcceptableMs / 1000)}s`)
+          throw new Error(
+            `Recording produced only ${Math.round(totalClipMs / 1000)}s of demo footage. ` +
+            `This product may not have enough publicly accessible content for a full demo video.`
+          )
+        }
+
+        logger.info(`videoProcessor: ${jobId} — total clip duration: ${Math.round(totalClipMs / 1000)}s (target: ${Math.round(targetMs / 1000)}s)`)
+
+        // Polish narrations into a coherent arc
+        await updateProgress(jobId, 63, 'Writing professional captions...')
+        const polished = await polishRecordedNarrations(
+          manifest.scenes,
+          understanding.product_name,
+          understanding,
+        )
+
+        for (let i = 0; i < manifest.scenes.length && i < polished.length; i++) {
+          manifest.scenes[i].narration = polished[i]
+        }
+
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
+        logger.info(`videoProcessor: ${jobId} — narrations polished and manifest updated`)
+      }
+    }
 
     // ─── STAGE 4: Silent Audio (TTS disabled to save credits) ──────────────
     {

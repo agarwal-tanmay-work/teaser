@@ -38,13 +38,6 @@ interface SkyvernSceneCapture {
   step_order: number
 }
 
-/** Skyvern artifact metadata */
-interface SkyvernArtifact {
-  artifact_id: string
-  artifact_type: string
-  uri: string
-}
-
 // ─── API Client ───────────────────────────────────────────────────────────────
 
 /**
@@ -249,6 +242,7 @@ export async function resetSceneCaptures(): Promise<void> {
 export function buildNavigationGoal(
   understanding: ProductUnderstanding,
   startUrl?: string,
+  targetVideoLengthSeconds = 150,
 ): string {
   // Only include page URLs if they look like real discovered URLs (not hallucinated)
   const pages = understanding.key_pages_to_visit
@@ -257,19 +251,20 @@ export function buildNavigationGoal(
     .join(', ')
 
   return [
-    `Browse and explore the website at ${startUrl ?? 'the homepage'}.`,
+    `Browse and explore the website at ${startUrl ?? 'the homepage'} for a professional ${targetVideoLengthSeconds}-second product launch demo.`,
     '',
     'INSTRUCTIONS:',
     `1. Start at ${startUrl ?? 'the homepage'}, wait for full page load.`,
     pages
       ? `2. Visit these pages if reachable from visible navigation: ${pages}`
-      : '2. Visit 2-3 distinct pages that are reachable from visible navigation links.',
+      : '2. Visit 3-6 distinct pages or page sections that are reachable from visible navigation links.',
     '3. Demonstrate whatever features and content are actually visible on each page. Do NOT assume or look for specific features — just interact with what you see.',
     '4. Ground every action in what is visibly on screen. Click buttons, links, and interactive elements you can see.',
-    '5. Scroll to reveal content below the fold. Spend 3-5 seconds per page.',
-    '6. Visit at least 3 pages/sections. Move the mouse smoothly (you are being recorded).',
+    '5. Scroll to reveal content below the fold. Spend 15-25 seconds per meaningful page or section.',
+    '6. Move the mouse smoothly, hover before clicking, and pause long enough for viewers to understand each screen.',
+    '7. Keep exploring until you have enough real footage for the requested duration. Do not finish after only a few interactions.',
     '',
-    'COMPLETE the task after visiting 3+ pages and performing 5+ interactions.',
+    `COMPLETE only after roughly ${targetVideoLengthSeconds} seconds of meaningful browsing, or after the step budget is exhausted.`,
     'AVOID: Login/signup pages, external links, downloads, authentication flows.',
   ].join('\n')
 }
@@ -284,6 +279,7 @@ export function buildManifestFromCaptures(
   captures: SkyvernSceneCapture[],
   understanding: ProductUnderstanding,
   productUrl: string,
+  recordingDurationMs?: number,
 ): RecordingManifest {
   const scenes: SceneCapture[] = captures.map((c, i) => {
     const targetElement: ElementBox | null =
@@ -291,12 +287,19 @@ export function buildManifestFromCaptures(
         ? { x: c.x, y: c.y, width: 100, height: 40 }
         : null
 
+    const nextCapture = captures[i + 1]
+    const fallbackEnd = c.timestamp_ms + 5000
+    const end = Math.min(
+      recordingDurationMs ?? fallbackEnd,
+      Math.max(c.timestamp_ms + 2500, nextCapture?.timestamp_ms ?? fallbackEnd),
+    )
+
     return {
       step: i + 1,
       action: c.action === 'click' ? 'click' : 'navigate',
       description: c.description || `Step ${i + 1}`,
       narration: c.description || `Exploring ${understanding.product_name}`,
-      clips: [{ start: c.timestamp_ms, end: c.timestamp_ms + 3000 }],
+      clips: [{ start: c.timestamp_ms, end }],
       targetElement,
       typeText: null,
       elementNotFound: false,
@@ -313,10 +316,34 @@ export function buildManifestFromCaptures(
   }
 }
 
+function syntheticNarration(understanding: ProductUnderstanding, index: number): string {
+  const planned = understanding.demo_flow[index]?.narration
+  if (planned) return planned
+
+  const features = understanding.top_5_features.length > 0
+    ? understanding.top_5_features
+    : ['the core workflow']
+  const feature = features[index % features.length]
+  const fallbackLines = [
+    `${understanding.product_name} keeps ${feature} easy to inspect.`,
+    `The demo now moves through real screens with context.`,
+    `${feature} becomes clearer as the page opens up.`,
+    `Teams can judge the workflow without guessing.`,
+    `${understanding.product_name} shows the next step in sequence.`,
+    `Each section adds a concrete product detail.`,
+    `${feature} gets screen time instead of a static loop.`,
+    `The browsing path stays paced for a launch demo.`,
+    `${understanding.product_name} keeps the product story moving.`,
+    `Viewers can follow the interface from screen to screen.`,
+  ]
+  return fallbackLines[index % fallbackLines.length]
+}
+
 /**
  * Generates a synthetic manifest directly from a video file when
- * scene captures metadata is unavailable. Spreads 5 scenes evenly
- * across the video's usable duration.
+ * scene captures metadata is unavailable. Keeps the entire recording as
+ * consecutive clips so a long Skyvern capture does not collapse to a short
+ * five-scene teaser.
  */
 export async function buildSyntheticManifest(
   videoPath: string,
@@ -324,21 +351,20 @@ export async function buildSyntheticManifest(
   productUrl: string,
 ): Promise<RecordingManifest> {
   const durationMs = (await ffprobeDurationMs(videoPath)) || 30000 // fallback to 30s
-  
-  const sceneCount = 5
-  const sceneDurationMs = 3000
-  const usableDuration = Math.max(durationMs - sceneDurationMs, sceneDurationMs)
-  
+
+  const sceneDurationMs = 5000
+  const sceneCount = Math.max(1, Math.ceil(durationMs / sceneDurationMs))
+
   const scenes: SceneCapture[] = Array.from({ length: sceneCount }).map((_, i) => {
-    // Distribute clips evenly, avoiding the very end
-    const start = Math.floor((i / Math.max(sceneCount - 1, 1)) * Math.min(usableDuration, durationMs * 0.8))
-    
+    const start = i * sceneDurationMs
+    const end = Math.min(durationMs, start + sceneDurationMs)
+
     return {
       step: i + 1,
       action: 'navigate',
-      description: `Exploring feature ${i + 1}`,
-      narration: `Exploring ${understanding.product_name}`,
-      clips: [{ start, end: start + sceneDurationMs }],
+      description: understanding.demo_flow[i]?.description ?? `Exploring product section ${i + 1}`,
+      narration: syntheticNarration(understanding, i),
+      clips: [{ start, end }],
       targetElement: null,
       typeText: null,
       elementNotFound: false,

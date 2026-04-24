@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import type { VideoLength, VideoTone, ApiResponse, VideoCreateResponse } from '@/types'
 
@@ -28,7 +28,7 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
 
   const [url, setUrl] = useState(initialUrl)
   const [description, setDescription] = useState('')
-  const [videoLength, setVideoLength] = useState<VideoLength>(60)
+  const [videoLength, setVideoLength] = useState<VideoLength>(150)
   const [tone, setTone] = useState<VideoTone>('professional')
   const [features, setFeatures] = useState('')
   const [credUsername, setCredUsername] = useState('')
@@ -103,7 +103,11 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
     }
   }
 
-  const videoLengths: VideoLength[] = [30, 60, 90]
+  const videoLengths: { value: VideoLength; label: string }[] = [
+    { value: 120, label: '2 min' },
+    { value: 150, label: '2.5 min' },
+    { value: 180, label: '3 min' },
+  ]
   const tones: { value: VideoTone; label: string }[] = [
     { value: 'professional', label: 'Professional' },
     { value: 'conversational', label: 'Conversational' },
@@ -170,18 +174,18 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
             <div>
               <label className="block text-white text-sm font-medium mb-2">Video length</label>
               <div className="flex gap-2">
-                {videoLengths.map((len) => (
+                {videoLengths.map(({ value, label }) => (
                   <button
-                    key={len}
+                    key={value}
                     type="button"
-                    onClick={() => setVideoLength(len)}
+                    onClick={() => setVideoLength(value)}
                     className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                      videoLength === len
+                      videoLength === value
                         ? 'bg-white text-black'
                         : 'bg-[#0A0A0A] text-[#6E6E6E] border border-[#1F1F1F] hover:text-white hover:border-white'
                     }`}
                   >
-                    {len} sec
+                    {label}
                   </button>
                 ))}
               </div>
@@ -301,7 +305,7 @@ export default function VideoForm({ onJobCreated }: VideoFormProps) {
           )}
         </button>
         <p className="mt-2 text-[#6E6E6E] text-sm text-center">
-          Your video will be ready in 5-10 minutes. We will show your progress below.
+          Your video will be ready in 10-15 minutes. We will show your progress below.
         </p>
       </div>
     </form>

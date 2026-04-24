@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { cookies } from 'next/headers'
 import { createServerClient as createSSRClient } from '@supabase/ssr'
 import { createServiceClient } from '@/lib/supabase'
-import type { ApiResponse } from '@/types'
+import type { ApiResponse, VideoLength } from '@/types'
 import { spawn } from 'child_process'
 import fs from 'fs'
 import path from 'path'
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     product_url: job.product_url as string,
     description: job.product_description as string | undefined,
     features: job.features_to_highlight as string | undefined,
-    video_length: job.video_length as 30 | 60 | 90,
+    video_length: job.video_length as VideoLength,
     tone: job.tone as 'professional' | 'conversational' | 'energetic',
     credentials,
     start_url,

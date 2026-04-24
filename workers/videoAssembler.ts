@@ -116,12 +116,11 @@ async function startAssetServer(
 }
 
 /**
- * Filters out noise scenes: failed element finds and sub-500 ms flashes that
- * would appear as single-frame strobes in the final video.
+ * Filters out true noise only. Failed element finds still contain deliberate
+ * fallback motion from the recorder, so they remain usable demo footage.
  */
 function filterProductiveScenes(scenes: SceneCapture[]): SceneCapture[] {
   return scenes.filter((s) => {
-    if (s.elementNotFound) return false
     if (!s.clips || s.clips.length === 0) return false
     const firstClip = s.clips[0]
     const duration = firstClip.end - firstClip.start
@@ -161,8 +160,11 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
   )
 
   const productiveScenes = filterProductiveScenes(manifest.scenes)
+  const totalClipMs = productiveScenes.reduce((total, scene) =>
+    total + scene.clips.reduce((st, clip) => st + Math.max(0, clip.end - clip.start), 0), 0)
   logger.info(
-    `assembleVideo [${jobId}]: ${productiveScenes.length}/${manifest.scenes.length} productive scenes`
+    `assembleVideo [${jobId}]: ${productiveScenes.length}/${manifest.scenes.length} productive scenes, ` +
+    `${Math.round(totalClipMs / 1000)}s total clip duration`
   )
   if (productiveScenes.length === 0) {
     throw new Error(

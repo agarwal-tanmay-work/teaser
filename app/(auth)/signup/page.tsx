@@ -74,7 +74,7 @@ function SignupForm() {
         <p className="text-on-surface-variant font-body text-sm leading-relaxed">
           We sent a confirmation link to{' '}
           <span className="text-on-surface font-medium">{email}</span>.
-          Click the link to activate your account — you'll land straight on your dashboard.
+          Click the link to activate your account — you&apos;ll land straight on your dashboard.
         </p>
         <p className="text-on-surface-variant font-body text-xs pt-2">
           Already confirmed?{' '}

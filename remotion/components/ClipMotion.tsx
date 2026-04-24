@@ -21,8 +21,9 @@ interface ClipMotionProps {
  *   element, brief hold, then zoom out. Origin is set to the element's
  *   centre so the frame feels drawn to where the action is.
  * - Scenes without a target (scroll / navigate / hover on nothing):
- *   slow Ken Burns pan — 1.00 → 1.04 across the clip with a gentle drift
- *   toward the lower third, which is where most UI action lives.
+ *   no artificial zoom. The recorder already captured real browser motion,
+ *   and adding Ken Burns to static recovery clips made failed demos look
+ *   like looping screenshots.
  *
  * All motion is clip-relative via `useCurrentFrame()` inside the child
  * `Sequence`, so zoom timings follow clip trim boundaries even when the
@@ -73,10 +74,9 @@ export const ClipMotion: React.FC<ClipMotionProps> = ({
     });
     scale = Math.min(zoomInPhase, zoomOutPhase);
   } else {
-    // Ken Burns: gentle scale from 1.00 → 1.04 with a whisper of drift.
-    scale = interpolate(t, [0, 1], [1.0, 1.04]);
-    translateX = interpolate(t, [0, 1], [0, -12]);
-    translateY = interpolate(t, [0, 1], [0, 8]);
+    scale = 1.0;
+    translateX = 0;
+    translateY = 0;
   }
 
   // Damped fade-in at clip head + fade-out at clip tail to smooth

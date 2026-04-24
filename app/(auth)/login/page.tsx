@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, Suspense } from 'react'
+import { useState, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createBrowserClient as createSSRBrowserClient } from '@supabase/ssr'
@@ -17,15 +17,11 @@ function getSupabase() {
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const initialError = searchParams.get('error')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    const urlError = searchParams.get('error')
-    if (urlError) setError(urlError)
-  }, [searchParams])
+  const [error, setError] = useState<string | null>(initialError)
 
   /** Submits login credentials to Supabase Auth. */
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {

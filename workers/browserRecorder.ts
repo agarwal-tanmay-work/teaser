@@ -5,13 +5,14 @@ import { spawn } from 'child_process'
 import { chromium, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import { getFfmpegPath } from '../lib/ffmpegUtils'
-import { identifyElementOnPage } from '../lib/gemini'
+import { identifyElementOnPage, planPageInteractions } from '../lib/gemini'
 import type {
   ProductUnderstanding,
   DemoStep,
   SceneCapture,
   RecordingManifest,
   ElementBox,
+  VideoLength,
 } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
@@ -22,7 +23,11 @@ const VIDEO_HEIGHT = 1080
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-const MAX_STEPS = 20
+const MAX_INITIAL_STEPS = 25
+const INTRO_OUTRO_SECONDS = 7
+const DEFAULT_VIDEO_LENGTH_SECONDS: VideoLength = 150
+const MIN_FINAL_VIDEO_SECONDS = 60
+const MAX_FINAL_VIDEO_SECONDS = 300
 
 const POPUP_HIDE_CSS = `
   [class*="cookie" i], [id*="cookie" i],
@@ -448,6 +453,112 @@ function urlKey(u: string): string | null {
 }
 
 /**
+ * Computes the target demo clip duration in ms, dynamically adjusted for
+ * the product's actual depth. More discoverable pages and interactive
+ * elements → longer target so the video covers the product properly.
+ */
+function targetDemoDurationMs(
+  videoLength: VideoLength = DEFAULT_VIDEO_LENGTH_SECONDS,
+  siteMapSize = 0,
+  interactiveElementCount = 0,
+): number {
+  let baseSeconds = Math.max(
+    MIN_FINAL_VIDEO_SECONDS,
+    Math.min(MAX_FINAL_VIDEO_SECONDS, videoLength),
+  )
+  // Products with more discoverable pages deserve more screen time
+  if (siteMapSize >= 8) baseSeconds = Math.max(baseSeconds, 210)
+  else if (siteMapSize >= 5) baseSeconds = Math.max(baseSeconds, 180)
+  else if (siteMapSize >= 3) baseSeconds = Math.max(baseSeconds, 150)
+  // Products with many interactive elements need time to demo them
+  if (interactiveElementCount >= 15) baseSeconds = Math.min(MAX_FINAL_VIDEO_SECONDS, baseSeconds + 30)
+  else if (interactiveElementCount >= 8) baseSeconds = Math.min(MAX_FINAL_VIDEO_SECONDS, baseSeconds + 15)
+  return Math.max(30_000, (baseSeconds - INTRO_OUTRO_SECONDS) * 1000)
+}
+
+function capturedClipDurationMs(scenes: SceneCapture[]): number {
+  return scenes.reduce((total, scene) => {
+    return total + scene.clips.reduce((sceneTotal, clip) => {
+      return sceneTotal + Math.max(0, clip.end - clip.start)
+    }, 0)
+  }, 0)
+}
+
+function minimumSceneDurationMs(action: DemoStep['action'], elementNotFound: boolean): number {
+  if (elementNotFound) return 3500
+  if (action === 'navigate') return 6000
+  if (action === 'click' || action === 'type') return 5000
+  if (action === 'hover') return 4000
+  if (action === 'scroll_down' || action === 'scroll_up') return 4500
+  return 3000
+}
+
+async function fallbackVisualMotion(page: Page, stepIndex: number): Promise<void> {
+  await easedMoveTo(
+    page,
+    stepIndex % 2 === 0 ? 1480 : 420,
+    stepIndex % 3 === 0 ? 760 : 360,
+  ).catch(() => {})
+  await smoothScroll(page, stepIndex % 2 === 0 ? 520 : -420).catch(async () => {
+    await page.waitForTimeout(900)
+  })
+}
+
+async function planLiveSteps(ctx: StepContext, allowNavigation: boolean): Promise<DemoStep[]> {
+  try {
+    await dismissPopups(ctx.page)
+    const screenshot = await ctx.page.screenshot({ type: 'jpeg', quality: 70 })
+    const steps = await planPageInteractions(
+      screenshot.toString('base64'),
+      ctx.page.url(),
+      ctx.understanding.product_name,
+      ctx.understanding,
+      ctx.visitedUrls,
+      allowNavigation,
+    )
+    // Allow click-based navigation (Gemini returns clicks on nav links).
+    // Only strip hard "navigate" actions which use guessed URLs.
+    return steps
+      .filter((step) => step.action !== 'navigate')
+      .slice(0, 6)
+  } catch (err) {
+    logger.warn('recorder: live page planning failed, falling back to scroll sequence', { err })
+    return [
+      {
+        step: 1,
+        action: 'scroll_down',
+        description: 'Explore more of the current page',
+        narration: `Here is ${ctx.understanding.product_name} in more detail.`,
+      },
+      {
+        step: 2,
+        action: 'scroll_down',
+        description: 'Continue through the product story',
+        narration: 'The product keeps the important details easy to scan.',
+      },
+      {
+        step: 3,
+        action: 'scroll_up',
+        description: 'Return to the key call to action',
+        narration: 'Everything leads back to a clear next step.',
+      },
+    ]
+  }
+}
+
+async function handlePageAfterScene(ctx: StepContext): Promise<void> {
+  const currentUrl = ctx.page.url()
+  if (!ctx.visitedUrls.includes(currentUrl)) {
+    ctx.visitedUrls.push(currentUrl)
+    logger.info(`recorder: navigated to new page -> ${currentUrl}`)
+    await dismissPopups(ctx.page)
+    // Longer dwell so the viewer sees the new page before interactions start
+    await ctx.page.waitForTimeout(2000)
+  }
+  await expandAllowedPaths(ctx.page, ctx.allowedPaths, ctx.productOrigin)
+}
+
+/**
  * Executes one demo step and writes a scene entry to the manifest.
  * All timeouts are tight — no step should freeze the recording for more
  * than a few seconds regardless of outcome.
@@ -460,6 +571,7 @@ async function captureStep(
   const { page, recordingStartTime } = ctx
   const t = () => Date.now() - recordingStartTime
   const sceneStart = t()
+  let clipStart = sceneStart
   let targetElement: ElementBox | null = null
   let elementNotFound = false
 
@@ -469,10 +581,18 @@ async function captureStep(
   try {
     switch (step.action) {
       case 'navigate': {
-        if (!step.navigate_to) break
+        if (!step.navigate_to) {
+          clipStart = t()
+          elementNotFound = true
+          break
+        }
         const raw = step.navigate_to.trim()
         // Skip in-page anchors — they don't change what's on screen meaningfully
-        if (raw.startsWith('#')) break
+        if (raw.startsWith('#')) {
+          clipStart = t()
+          elementNotFound = true
+          break
+        }
         const targetUrl = raw.startsWith('http')
           ? raw
           : new URL(raw, ctx.productUrl).href
@@ -487,6 +607,7 @@ async function captureStep(
           })()
           if (!sameOrigin || !key || !ctx.allowedPaths.has(key)) {
             logger.warn(`recorder step ${stepIndex}: navigate_to "${targetUrl}" not in siteMap — skipping`)
+            clipStart = t()
             elementNotFound = true
             break
           }
@@ -529,6 +650,7 @@ async function captureStep(
           const fallback = await visionClickFallback(page, step.element_to_click ?? '')
           if (fallback.locator) {
             try {
+              clipStart = t()
               if (fallback.elementBox) {
                 targetElement = fallback.elementBox
                 await easedMoveTo(page, targetElement.x, targetElement.y)
@@ -541,6 +663,7 @@ async function captureStep(
             }
           } else {
             logger.warn(`recorder step ${stepIndex}: "${step.element_to_click}" not found even after vision fallback`)
+            clipStart = t()
             elementNotFound = true
           }
         }
@@ -569,6 +692,7 @@ async function captureStep(
             elementNotFound = true
           }
         } else {
+          clipStart = t()
           elementNotFound = true
         }
         break
@@ -589,9 +713,11 @@ async function captureStep(
             await easedMoveTo(page, targetElement.x, targetElement.y)
             await page.waitForTimeout(900)
           } else {
+            clipStart = t()
             elementNotFound = true
           }
         } else {
+          clipStart = t()
           elementNotFound = true
         }
         break
@@ -613,6 +739,18 @@ async function captureStep(
     }
   } catch (err) {
     logger.warn(`recorder step ${stepIndex} (${step.action}) errored`, { err })
+    if (!targetElement) clipStart = t()
+    elementNotFound = true
+  }
+
+  if (elementNotFound) {
+    await fallbackVisualMotion(page, stepIndex)
+  }
+
+  const minSceneMs = minimumSceneDurationMs(step.action, elementNotFound)
+  const remainingMs = minSceneMs - (t() - clipStart)
+  if (remainingMs > 0) {
+    await page.waitForTimeout(remainingMs)
   }
 
   const sceneEnd = t()
@@ -621,7 +759,7 @@ async function captureStep(
     action: step.action,
     description: step.description,
     narration: step.narration,
-    clips: elementNotFound ? [] : [{ start: sceneStart, end: sceneEnd }],
+    clips: [{ start: Math.min(clipStart, sceneEnd), end: sceneEnd }],
     targetElement,
     typeText: step.type_text ?? null,
     elementNotFound,
@@ -632,10 +770,9 @@ async function captureStep(
 // ─── Main recorder ────────────────────────────────────────────────────────────
 
 /**
- * Records a product demo by executing the pre-planned steps from
- * `understanding.demo_flow`. All Gemini API calls happen BEFORE this
- * function is called, so the recording session is pure browser interaction
- * with no API gaps that would cause frozen/fast-forwarded video.
+ * Records a product demo by executing the pre-planned seed steps, then
+ * extending the session with screenshot-grounded live plans until the kept
+ * demo clips reach the requested final video length.
  */
 export async function recordProduct(
   productUrl: string,
@@ -644,11 +781,22 @@ export async function recordProduct(
   _credentials?: { username: string; password: string },
   startUrl?: string,
   siteMap: string[] = [],
+  targetVideoLength: VideoLength = DEFAULT_VIDEO_LENGTH_SECONDS,
 ): Promise<string> {
   const outputDir = path.join(RECORDINGS_DIR, jobId)
   fs.mkdirSync(outputDir, { recursive: true })
 
+  // Count interactive elements from the understanding to inform dynamic duration
+  const interactiveCount = understanding.demo_flow.filter(
+    (s) => s.action === 'click' || s.action === 'type' || s.action === 'hover',
+  ).length
+
   logger.info(`recorder: starting job ${jobId} for ${productUrl}`)
+  const targetDemoMs = targetDemoDurationMs(targetVideoLength, siteMap.length, interactiveCount)
+  const maxWallClockMs = Math.min(15 * 60_000, targetDemoMs + 8 * 60_000)
+  logger.info(
+    `recorder: target final length ${targetVideoLength}s -> ${Math.round(targetDemoMs / 1000)}s demo clips`,
+  )
 
   // Build an allow-list of host+path entries from the discovered siteMap.
   // Any navigate_to step that does not resolve to one of these is skipped.
@@ -662,11 +810,10 @@ export async function recordProduct(
     logger.info(`recorder: navigate allow-list has ${allowedPaths.size} entries`)
   }
 
-  // ── Build step plan from pre-computed demo_flow ───────────────────────────
-  // No Gemini calls here — the understanding was already generated in Stage 1.
-  // Append fallback scrolls to guarantee minimum footage on thin pages.
+  // ── Build seed plan from pre-computed demo_flow ───────────────────────────
+  // The live loop below extends this seed until the requested duration is met.
   const demoSteps: DemoStep[] = [
-    ...understanding.demo_flow.slice(0, MAX_STEPS),
+    ...understanding.demo_flow.slice(0, MAX_INITIAL_STEPS),
   ]
 
   const hasScrolls = demoSteps.some(
@@ -681,7 +828,7 @@ export async function recordProduct(
     )
   }
 
-  logger.info(`recorder: ${demoSteps.length} pre-planned steps (no API calls during recording)`)
+  logger.info(`recorder: ${demoSteps.length} pre-planned seed steps`)
 
   // ── Open browser with recordVideo ─────────────────────────────────────────
   // headless: false — compositor renders at full speed, capturing real motion.
@@ -738,34 +885,124 @@ export async function recordProduct(
       productOrigin,
     }
 
-    // ── Execute all pre-planned steps ─────────────────────────────────────────
-    for (let i = 0; i < demoSteps.length; i++) {
-      const step = demoSteps[i]
-      const scene = await captureStep(ctx, step, i + 1)
-      scenes.push(scene)
+    // ── Execute seed steps, then extend with live screenshot-grounded plans ───
+    let stepCounter = 0
+    const lastNarrations: string[] = [] // track recent narrations to prevent looping
 
-      // Track URL changes for the manifest (for reference, not re-planning)
-      const currentUrl = page.url()
-      if (!visitedUrls.includes(currentUrl)) {
-        visitedUrls.push(currentUrl)
-        logger.info(`recorder: navigated to new page → ${currentUrl}`)
-        await dismissPopups(page)
-        // Re-inject cursor script on new pages (SPA transitions don't always
-        // re-execute page scripts)
-        await page.addInitScript(CURSOR_SCRIPT).catch(() => {})
-        await page.waitForTimeout(600)
-        // Expand the allow-list with newly discovered links on this page
-        await expandAllowedPaths(page, ctx.allowedPaths, ctx.productOrigin)
+    /** Pushes a scene and deduplicates narration against recent history. */
+    function pushScene(scene: SceneCapture): void {
+      // Prevent caption looping: if this narration matches any of the last 3, tweak it
+      const cleanNarration = (scene.narration ?? '').replace(/\s+/g, ' ').trim()
+      if (cleanNarration && lastNarrations.includes(cleanNarration)) {
+        scene.narration = `${understanding.product_name} continues the product story.`
+      }
+      lastNarrations.push((scene.narration ?? '').replace(/\s+/g, ' ').trim())
+      if (lastNarrations.length > 4) lastNarrations.shift()
+      scenes.push(scene)
+    }
+
+    for (let i = 0; i < demoSteps.length; i++) {
+      if (capturedClipDurationMs(scenes) >= targetDemoMs) break
+      if (Date.now() - recordingStartTime >= maxWallClockMs) break
+      const step = demoSteps[i]
+      const scene = await captureStep(ctx, step, ++stepCounter)
+      pushScene(scene)
+      await handlePageAfterScene(ctx)
+    }
+
+    let liveBatch = 0
+    let batchesOnCurrentPage = 0
+    let lastPageUrl = page.url()
+    let scrollOnlyBatches = 0
+
+    while (capturedClipDurationMs(scenes) < targetDemoMs) {
+      const wallClockMs = Date.now() - recordingStartTime
+      if (wallClockMs >= maxWallClockMs) {
+        logger.warn(
+          `recorder: hit wall-clock cap with ${Math.round(capturedClipDurationMs(scenes) / 1000)}s clips`,
+        )
+        break
+      }
+      if (liveBatch >= 50) {
+        logger.warn('recorder: hit live planning batch cap')
+        break
+      }
+
+      // Track whether we're stuck on the same page
+      const currentPageUrl = page.url()
+      if (currentPageUrl === lastPageUrl) {
+        batchesOnCurrentPage++
+      } else {
+        batchesOnCurrentPage = 0
+        scrollOnlyBatches = 0
+        lastPageUrl = currentPageUrl
+      }
+
+      const remainingMs = targetDemoMs - capturedClipDurationMs(scenes)
+      // Allow navigation when: enough time remaining, haven't visited too many pages,
+      // OR we've been stuck on the same page for 3+ batches
+      const allowNavigation = (remainingMs > 15_000 && visitedUrls.length < 8) ||
+        batchesOnCurrentPage >= 3
+      liveBatch++
+      logger.info(
+        `recorder: live plan ${liveBatch} (${Math.round(remainingMs / 1000)}s clips remaining, ` +
+        `navigation ${allowNavigation ? 'on' : 'off'}, batches on page: ${batchesOnCurrentPage})`,
+      )
+
+      // If stuck on same page with only scrolls for 2+ batches, force-navigate to next unvisited page
+      if (scrollOnlyBatches >= 2 && siteMap.length > 0) {
+        const unvisited = siteMap.find((u) => {
+          const key = urlKey(u)
+          return key && !visitedUrls.some((v) => urlKey(v) === key)
+        })
+        if (unvisited) {
+          logger.info(`recorder: force-navigating to unvisited page: ${unvisited}`)
+          const navStep: DemoStep = {
+            step: stepCounter + 1,
+            action: 'navigate',
+            description: `Navigate to ${new URL(unvisited).pathname}`,
+            narration: `Let's explore another part of ${understanding.product_name}.`,
+            navigate_to: unvisited,
+          }
+          const scene = await captureStep(ctx, navStep, ++stepCounter)
+          pushScene(scene)
+          await handlePageAfterScene(ctx)
+          batchesOnCurrentPage = 0
+          scrollOnlyBatches = 0
+          lastPageUrl = page.url()
+          continue
+        }
+      }
+
+      const liveSteps = await planLiveSteps(ctx, allowNavigation)
+
+      // Track if this batch is scroll-only
+      const isScrollOnly = liveSteps.every(
+        (s) => s.action === 'scroll_down' || s.action === 'scroll_up',
+      )
+      if (isScrollOnly) {
+        scrollOnlyBatches++
+      } else {
+        scrollOnlyBatches = 0
+      }
+
+      for (const step of liveSteps) {
+        if (capturedClipDurationMs(scenes) >= targetDemoMs) break
+        if (Date.now() - recordingStartTime >= maxWallClockMs) break
+        const scene = await captureStep(ctx, step, ++stepCounter)
+        pushScene(scene)
+        await handlePageAfterScene(ctx)
       }
     }
 
     await page.waitForTimeout(800)
 
     const wallClockMs = Date.now() - recordingStartTime
+    const clipMs = capturedClipDurationMs(scenes)
     logger.info(
-      `recorder: ${scenes.length} scenes / ${visitedUrls.length} URLs / ${Math.round(wallClockMs / 1000)}s wall-clock`,
+      `recorder: ${scenes.length} scenes / ${visitedUrls.length} URLs / ${Math.round(clipMs / 1000)}s clips / ${Math.round(wallClockMs / 1000)}s wall-clock`,
     )
-    logger.info(`recorder: URLs visited: ${visitedUrls.join(' → ')}`)
+    logger.info(`recorder: URLs visited: ${visitedUrls.join(' -> ')}`)
 
     // ── Finalise recording ────────────────────────────────────────────────────
     // Closing the context tells Playwright to finish writing the WebM.

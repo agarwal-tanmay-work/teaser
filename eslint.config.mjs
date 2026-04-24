@@ -11,6 +11,7 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    "skyvern-fork/**",
     "next-env.d.ts",
   ]),
 ]);

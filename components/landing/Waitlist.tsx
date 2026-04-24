@@ -95,12 +95,12 @@ export default function Waitlist() {
             <div className="w-16 h-16 rounded-full ai-energy-gradient flex items-center justify-center shadow-lg">
               <span className="material-symbols-outlined text-on-primary-fixed text-3xl">check</span>
             </div>
-            <p className="font-headline font-bold text-3xl text-on-surface">You're on the list!</p>
+            <p className="font-headline font-bold text-3xl text-on-surface">You&apos;re on the list!</p>
             <p className="text-on-surface-variant text-lg">
               You are position <span className="ai-energy-text font-bold">#{result.position}</span>.
             </p>
             <p className="text-on-surface-variant text-sm">
-              We'll email <span className="text-on-surface">{email}</span> when your spot is ready.
+              We&apos;ll email <span className="text-on-surface">{email}</span> when your spot is ready.
             </p>
           </div>
         )}

@@ -93,18 +93,30 @@ export const KaraokeCaptions: React.FC<KaraokeCaptionsProps> = ({ scenes, startF
 
   const relFrame = frame - startFrame;
 
-  let cumulative = 0;
-  const timed: TimedScene[] = scenes.map((scene) => {
+  const { timed } = scenes.reduce(
+    (acc, scene) => {
     const sceneDur = scene.clips.reduce(
       (acc, clip) => acc + Math.round(((clip.end - clip.start) / 1000) * fps),
       0
     );
-    const sceneStart = cumulative;
-    cumulative += sceneDur;
-    const parsed = parseNarration(scene.narration ?? '');
+    const sceneStart = acc.cumulative;
+    const narrationText = (scene.narration ?? '').trim();
+    // Skip scenes with empty narration — no blank caption boxes
+    if (!narrationText) {
+      return {
+        cumulative: acc.cumulative + sceneDur,
+        timed: acc.timed,
+      };
+    }
+    const parsed = parseNarration(narrationText);
     const words = buildTimedWords(parsed, sceneStart, sceneDur, fps, scene.wordTimings);
-    return { sceneStart, sceneDur, words };
-  });
+      return {
+        cumulative: acc.cumulative + sceneDur,
+        timed: [...acc.timed, { sceneStart, sceneDur, words }],
+      };
+    },
+    { cumulative: 0, timed: [] as TimedScene[] }
+  );
 
   const active = timed.find(
     (s) => relFrame >= s.sceneStart && relFrame < s.sceneStart + s.sceneDur

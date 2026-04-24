@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { generateScript } from '@/lib/gemini'
 import { logger } from '@/lib/logger'
-import type { ApiResponse, VideoScript } from '@/types'
+import type { ApiResponse, ProductUnderstanding, VideoScript } from '@/types'
 
 const ScriptSchema = z.object({
   product_understanding: z.object({
@@ -28,7 +28,7 @@ const ScriptSchema = z.object({
     ),
   }),
   tone: z.enum(['professional', 'conversational', 'energetic']),
-  video_length: z.union([z.literal(30), z.literal(60), z.literal(90)]),
+  video_length: z.union([z.literal(120), z.literal(150), z.literal(180)]),
 })
 
 /**
@@ -55,7 +55,7 @@ export async function POST(
 
     let script: VideoScript
     try {
-      script = await generateScript(product_understanding as any, tone, video_length)
+      script = await generateScript(product_understanding as ProductUnderstanding, tone, video_length)
     } catch (error) {
       logger.error('videos/script: Gemini script generation failed', { error })
       return NextResponse.json(

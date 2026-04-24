@@ -1,3 +1,5 @@
+/* eslint-disable @next/next/no-img-element */
+
 export default function Features() {
   return (
     <section className="max-w-[1440px] mx-auto px-8 py-32 space-y-16">
@@ -11,7 +13,7 @@ export default function Features() {
           <div className="relative z-10 max-w-sm">
             <span className="material-symbols-outlined text-primary text-4xl mb-6">psychology</span>
             <h3 className="text-3xl font-headline font-bold mb-4">Autonomous Scene Direction</h3>
-            <p className="text-on-surface-variant font-body leading-relaxed">Our AI doesn't just record. It directs. It chooses the best camera angles, identifies key features, and adds rhythmic transitions synced to music.</p>
+            <p className="text-on-surface-variant font-body leading-relaxed">Our AI doesn&apos;t just record. It directs. It chooses the best camera angles, identifies key features, and adds rhythmic transitions synced to music.</p>
           </div>
           <div className="absolute bottom-0 right-0 w-1/2 h-full opacity-50 group-hover:opacity-80 transition-opacity">
             <img alt="Neural network visualization" className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDTA6Fgy_OXBkS9NCHTWbRn93XEuOQR-0mjVQu2s6D5_mHil2kd_8Ww6u2LwjT9Rr1-Bjr4RBLtFHqEPdnQ4OfDpc4AP51IcxjYcajudr94tmQJ_-LjBDuxXeB3uqhVGrfJbz8FthNU5s5C7ulSFl0SFzKABZRhTgVRtk89OeEGrQ13enuuNs-nPfuzovEW7ZNm7e7a4QN_kzfgRYadnyeTxsVtUDUo9zOxLGBvBP-SOszh181YUEdutgUzPKQGL-ht_xZK05jbGdA"/>

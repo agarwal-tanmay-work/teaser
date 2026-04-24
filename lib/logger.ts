@@ -15,13 +15,13 @@ export const logger = winston.createLogger({
         winston.format.timestamp({ format: 'HH:mm:ss' }),
         winston.format.printf(({ timestamp, level, message, ...meta }) => {
           // Handle Error objects in meta so they don't show as '{}'
-          const cleanMeta = { ...meta }
+          const cleanMeta: Record<string, unknown> = { ...meta }
           for (const key in cleanMeta) {
-            if (cleanMeta[key] instanceof Error) {
+            const value = cleanMeta[key]
+            if (value instanceof Error) {
               cleanMeta[key] = {
-                message: cleanMeta[key].message,
-                stack: cleanMeta[key].stack,
-                ...(cleanMeta[key] as any)
+                message: value.message,
+                stack: value.stack,
               }
             }
           }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate } from 'remotion';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig } from 'remotion';
 
 export const ProgressBar: React.FC = () => {
   const frame = useCurrentFrame();

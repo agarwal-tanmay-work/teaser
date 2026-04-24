@@ -16,6 +16,13 @@ interface AnimatedGridPatternProps {
   className?: string
 }
 
+function generateSquares(count: number) {
+  return Array.from({ length: count }, () => [
+    Math.floor(Math.random() * 30),
+    Math.floor(Math.random() * 30),
+  ] as [number, number])
+}
+
 /**
  * AnimatedGridPattern — 21st.dev / MagicUI-inspired animated SVG grid.
  * Renders a grid of rectangles that randomly fade in and out,
@@ -45,13 +52,6 @@ export function AnimatedGridPattern({
       Math.floor((Math.random() * dimensions.width) / width),
       Math.floor((Math.random() * dimensions.height) / height),
     ] as [number, number]
-  }
-
-  function generateSquares(count: number) {
-    return Array.from({ length: count }, () => [
-      Math.floor(Math.random() * 30),
-      Math.floor(Math.random() * 30),
-    ] as [number, number])
   }
 
   function updateSquarePosition(squareId: number) {

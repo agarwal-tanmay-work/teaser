@@ -1,5 +1,4 @@
-import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment, InteractiveInventory, InteractiveElement } from '@/types'
-import { retryWithBackoff } from '@/lib/utils'
+import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment, InteractiveInventory } from '@/types'
 import { logger } from '@/lib/logger'
 import * as https from 'https'
 
@@ -21,6 +20,18 @@ const VISION_MODEL_CHAIN = [
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
 ]
+
+interface GeminiTextResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{ text?: string }>
+    }
+  }>
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
 /**
  * Races a promise against a timeout. Rejects with a descriptive error if the timeout fires first.
@@ -59,11 +70,11 @@ function isRateLimited(err: unknown): boolean {
 /**
  * Parses the retry delay from a Groq 429 error. Returns ms to wait, or 35000 default.
  */
-function parseGeminiRetryDelay(err: unknown): number {
+function parseGeminiRetryDelay(): number {
   return 35_000 // default 35s wait for rate limits for Gemini
 }
 
-async function httpsPost(urlStr: string, payload: any): Promise<any> {
+async function httpsPost<TResponse>(urlStr: string, payload: unknown): Promise<TResponse> {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(urlStr)
     const data = JSON.stringify(payload)
@@ -87,8 +98,8 @@ async function httpsPost(urlStr: string, payload: any): Promise<any> {
           reject(new Error(`API Error: ${res.statusCode} ${res.statusMessage} - ${body}`))
         } else {
           try {
-            resolve(JSON.parse(body))
-          } catch (e) {
+            resolve(JSON.parse(body) as TResponse)
+          } catch {
             reject(new Error(`Invalid JSON response: ${body.substring(0, 100)}`))
           }
         }
@@ -114,15 +125,15 @@ async function callGemini(modelName: string, systemInstruction: string, prompt: 
     : prompt
 
   try {
-    const data = await httpsPost(url, {
+    const data = await httpsPost<GeminiTextResponse>(url, {
       contents: [{
         role: "user",
         parts: [{ text: textPayload }]
       }]
     })
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  } catch (err: any) {
-    throw new Error(`Gemini API error: ${err.message}`)
+  } catch (err: unknown) {
+    throw new Error(`Gemini API error: ${errorMessage(err)}`)
   }
 }
 
@@ -130,7 +141,7 @@ async function callGeminiVision(modelName: string, prompt: string, screenshotBas
   const url = `${GEMINI_BASE_URL}/${modelName}:generateContent?key=${GEMINI_API_KEY}`
 
   try {
-    const data = await httpsPost(url, {
+    const data = await httpsPost<GeminiTextResponse>(url, {
       contents: [{
         role: "user",
         parts: [
@@ -140,8 +151,8 @@ async function callGeminiVision(modelName: string, prompt: string, screenshotBas
       }]
     })
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  } catch (err: any) {
-    throw new Error(`Gemini Vision API error: ${err.message}`)
+  } catch (err: unknown) {
+    throw new Error(`Gemini Vision API error: ${errorMessage(err)}`)
   }
 }
 
@@ -176,7 +187,7 @@ async function generateWithFallback(
 
         // Rate limited (429) — wait for the retry period, then retry SAME model
         if (isRateLimited(err)) {
-          const waitMs = parseGeminiRetryDelay(err)
+          const waitMs = parseGeminiRetryDelay()
           logger.info(`gemini: ${modelName} rate limited — waiting ${Math.round(waitMs / 1000)}s before retry`)
           await new Promise(resolve => setTimeout(resolve, waitMs))
           continue // retry same model
@@ -216,7 +227,7 @@ const UNDERSTAND_SYSTEM_PROMPT = `You are an expert product analyst and demo vid
 CRITICAL RULES:
 1. Return valid JSON matching the exact schema below. No extra text, no markdown fences.
 2. For element_to_click: you MUST use text EXACTLY as it appears in the VERIFIED INTERACTIVE ELEMENTS list below. Pick from that list. Do NOT invent, paraphrase, or guess button/link text. If the list doesn't contain an element you want to click, DO NOT include that step.
-3. Generate 10-18 demo steps. AT LEAST 8 must be click, navigate, or type actions. MAX 2 scroll steps total — scrolls are filler, not content.
+3. Generate 15-25 demo steps. AT LEAST 10 must be click, navigate, or type actions. MAX 3 scroll steps total — scrolls are filler, not content.
 4. The demo MUST navigate AWAY from the homepage by step 3. Show the actual product interface, not just the marketing page.
 5. MUST contain at least 3 distinct "navigate" steps, each pointing at a URL from the VERIFIED SUBPAGES list below. NEVER invent URLs. NEVER use in-page anchors like "#features".
 6. NEVER include steps that navigate to login, signup, register, auth, or password-reset pages.
@@ -291,7 +302,7 @@ ALLOWED ACTIONS:
 
 // ─── SYSTEM PROMPT: Video Script Generation ──────────────────────────────────
 
-const SCRIPT_SYSTEM_PROMPT = `You are a top-tier scriptwriter for Product Hunt launch videos. You write the on-screen captions for 60–90-second silent-friendly demo videos that the viewer WATCHES, not listens to — every line appears as bold karaoke-style captions while the product is shown.
+const SCRIPT_SYSTEM_PROMPT = `You are a top-tier scriptwriter for Product Hunt launch videos. You write the on-screen captions for 2–3 minute silent-friendly demo videos that the viewer WATCHES, not listens to — every line appears as bold karaoke-style captions while the product is shown.
 
 YOUR JOB: Turn a product understanding + demo flow into punchy, concrete, specific caption copy that makes a scroller stop scrolling.
 
@@ -319,7 +330,7 @@ If your draft contains any of these, REWRITE it with a specific, concrete claim 
 ━━━ TECHNICAL RULES ━━━
 1. Return valid JSON matching the exact schema below. No extra text, no markdown fences.
 2. Number of segments MUST exactly equal the number of demo_flow steps. Each segment i maps to demo_flow step i+1.
-3. Timing: allocate 3–6 seconds per step. Click/type steps get 4–5s, navigate steps get 5–6s, scroll/wait get 3–4s. Segments must be contiguous (each start_time equals the previous end_time).
+3. Timing: allocate the full requested duration across the exact number of steps. For longer demos, 6–12 seconds per segment is fine. Click/type/navigate steps should usually get more time than scroll/wait steps. Segments must be contiguous (each start_time equals the previous end_time).
 4. "what_to_show" briefly describes what's visible on screen during this segment — this is an internal hint, not shown to the viewer.
 
 OUTPUT SCHEMA (return ONLY this JSON, nothing else):
@@ -525,7 +536,7 @@ ${inputElements.join('\n')}
 
 PRODUCT URL: ${productUrl}
 
-VIDEO LENGTH: ${videoLength} seconds (plan approximately ${Math.floor(videoLength / 4)} demo steps, minimum 10)
+VIDEO LENGTH: ${videoLength} seconds (create a strong 15-25 step seed flow; the browser recorder will extend it live to the full duration)
 ${descriptionBlock}${siteMapBlock}${interactiveBlock}
 
 SCRAPED WEBSITE CONTENT:
@@ -535,7 +546,7 @@ Remember:
 - For element_to_click: COPY the exact text from the VERIFIED INTERACTIVE ELEMENTS list above. Do NOT invent, paraphrase, or abbreviate.
 - For navigate_to: COPY a URL from the VERIFIED SUBPAGE URLS list above. Do NOT invent URLs.
 - PREFER clicking a navigation link (action: "click") over action: "navigate" when the link text exists in the verified elements. Clicking looks more natural in the demo.
-- Generate AT LEAST 8 click/navigate/type steps — scrolls are filler, not content
+- Generate AT LEAST 10 click/navigate/type steps — scrolls are filler, not content
 - Navigate AWAY from homepage by step 3 into the actual product
 - Visit at least 3 different subpages to show the product depth
 - Follow the narrative arc: Hook → Into the product → Feature demos → CTA
@@ -692,7 +703,7 @@ Return ONLY valid JSON (no markdown):
         .map((s: unknown, i: number) => repairDemoStep(s, i, pageUrl))
         // Enforce no-navigate at application level (defense in depth vs. prompt adherence)
         .filter((s) => s.action !== 'navigate')
-        .slice(0, 4)
+        .slice(0, 6)
       logger.info(`gemini: planPageInteractions: ${steps.length} in-page steps`)
       return steps
     } catch (err) {
@@ -784,4 +795,91 @@ Return ONLY valid JSON: {"element_text": "exact text here"} or {"element_text": 
 
   logger.warn('identifyElementOnPage: all vision models exhausted')
   return null
+}
+
+/**
+ * Post-recording narration polish: takes ALL recorded scenes and rewrites
+ * their narrations into a coherent professional narrative arc.
+ *
+ * Called AFTER recording is complete but BEFORE Remotion renders, so the
+ * captions tell a proper story instead of showing raw/repetitive text
+ * from the live planning phase.
+ *
+ * Falls back to the original narrations if the API call fails.
+ */
+export async function polishRecordedNarrations(
+  scenes: Array<{ description: string; narration: string; action: string; pageUrl: string }>,
+  productName: string,
+  understanding: { tagline: string; core_value_prop: string; problem_being_solved: string; top_5_features: string[] },
+): Promise<string[]> {
+  if (scenes.length === 0) return []
+
+  const sceneList = scenes.map((s, i) => ({
+    i: i + 1,
+    action: s.action,
+    desc: s.description,
+    page: s.pageUrl,
+    raw: s.narration,
+  }))
+
+  const prompt = `You are rewriting captions for a silent-friendly product demo video of "${productName}".
+
+PRODUCT: ${productName}
+TAGLINE: ${understanding.tagline}
+VALUE PROP: ${understanding.core_value_prop}
+PROBLEM SOLVED: ${understanding.problem_being_solved}
+KEY FEATURES: ${understanding.top_5_features.join(', ')}
+
+Below are the ${scenes.length} scenes that were ACTUALLY recorded. Each has a raw narration from the live recording session. Your job is to rewrite every narration into a coherent narrative arc.
+
+SCENES:
+${JSON.stringify(sceneList, null, 1)}
+
+RULES:
+1. Return a JSON array of exactly ${scenes.length} strings — one polished narration per scene, in order.
+2. Follow this arc across the full sequence:
+   - First 10-15%: HOOK — provocative claim or pain point. Never "Introducing ${productName}".
+   - Next 10-15%: PROBLEM — specific, concrete pain.
+   - Middle 50-60%: PRODUCT IN ACTION — one outcome per caption. Show what ${productName} DOES, not that it exists.
+   - Next 10%: PROOF or category claim.
+   - Last caption: CTA — short, directive.
+3. Each narration: ONE sentence, 6-14 words. Present tense, active voice.
+4. Use **double asterisks** on 1-2 emphasis words per narration (these render as amber in captions).
+5. Reference "${productName}" by name at least 3 times across all narrations.
+6. NEVER repeat the same narration. Every single one must be unique.
+7. BANNED: "unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly".
+8. Do NOT describe what's happening on screen ("now we click", "as you can see"). The video SHOWS that. The caption DELIVERS the value claim.
+
+Return ONLY a JSON array of strings, nothing else.`
+
+  try {
+    const text = await generateWithFallback('', prompt)
+    const jsonText = extractJson(text)
+    const parsed = JSON.parse(jsonText.replace(/\\n/g, ' '))
+
+    if (Array.isArray(parsed) && parsed.length === scenes.length) {
+      // Validate every element is a non-empty string
+      const valid = parsed.every((s: unknown) => typeof s === 'string' && s.length > 0)
+      if (valid) {
+        logger.info(`gemini: polished ${scenes.length} narrations into coherent arc`)
+        return parsed as string[]
+      }
+    }
+
+    // If array length doesn't match, try to extract from object with "narrations" key
+    if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const obj = parsed as Record<string, unknown>
+      const narrations = obj.narrations ?? obj.captions ?? obj.segments
+      if (Array.isArray(narrations) && narrations.length === scenes.length) {
+        logger.info(`gemini: polished ${scenes.length} narrations (from object key)`)
+        return narrations.map((n: unknown) => typeof n === 'string' ? n : String(n))
+      }
+    }
+
+    logger.warn('gemini: polish returned wrong count, keeping originals')
+    return scenes.map((s) => s.narration)
+  } catch (err) {
+    logger.warn('gemini: polishRecordedNarrations failed, keeping original narrations', { error: err })
+    return scenes.map((s) => s.narration)
+  }
 }

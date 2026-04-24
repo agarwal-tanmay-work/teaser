@@ -29,7 +29,7 @@ export default function Footer() {
       <div className="max-w-[1440px] mx-auto grid grid-cols-1 md:grid-cols-4 gap-12">
         <div className="space-y-6">
           <span className="text-2xl font-headline font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-primary to-secondary">Teaser</span>
-          <p className="text-on-surface-variant text-sm font-body leading-relaxed">The world's first autonomous video production engine for software founders. Professional results in minutes.</p>
+          <p className="text-on-surface-variant text-sm font-body leading-relaxed">The world&apos;s first autonomous video production engine for software founders. Professional results in minutes.</p>
         </div>
         <div>
           <h4 className="font-headline font-bold mb-6">Product</h4>

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
 import './globals.css'
 
+/* eslint-disable @next/next/no-page-custom-font */
+
 export const metadata: Metadata = {
   title: 'Teaser - URL to Professional Launch Video',
   description: 'Transform your product link into a cinematic masterpiece instantly.',
