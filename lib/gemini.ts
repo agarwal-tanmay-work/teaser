@@ -77,6 +77,32 @@ function isRateLimited(err: unknown): boolean {
 }
 
 /**
+ * Returns true when the error is a 503 / overloaded / unavailable response.
+ * These are transient — the model is under high demand and a short wait
+ * usually resolves it. Retry the SAME model with backoff before falling
+ * to the next model in the chain.
+ */
+function isTransientUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  const lower = msg.toLowerCase()
+  return msg.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('high demand')
+}
+
+/**
+ * Returns a short, log-friendly summary of an error. Avoids dumping a
+ * 30-line stack trace on every transient 503.
+ */
+function shortErr(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  // Drop the verbose Gemini API JSON body if present.
+  const trimmed = msg.split('\n')[0].slice(0, 180)
+  return trimmed
+}
+
+/**
  * Parses the retry delay from a Groq 429 error. Returns ms to wait, or 35000 default.
  */
 function parseGeminiRetryDelay(): number {
@@ -175,7 +201,7 @@ async function generateWithFallback(
   let lastError: Error | null = null
 
   for (const modelName of MODEL_CHAIN) {
-    // Try each model up to 3 times, with special handling for rate limits
+    // Try each model up to 3 times, with special handling for transient errors
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         logger.info(`gemini: trying model ${modelName} (attempt ${attempt + 1}/3)`)
@@ -190,7 +216,7 @@ async function generateWithFallback(
 
         // True quota exhaustion (402 / daily cap) — skip to next model immediately
         if (isQuotaExhausted(err)) {
-          logger.warn(`gemini: ${modelName} quota exhausted — skipping to next model`)
+          logger.info(`gemini: ${modelName} quota exhausted — skipping to next model`)
           break
         }
 
@@ -202,8 +228,18 @@ async function generateWithFallback(
           continue // retry same model
         }
 
-        // Other error — log and try next model
-        logger.warn(`gemini: model ${modelName} failed`, { error: lastError.message.slice(0, 200) })
+        // 503 overloaded — short backoff, retry SAME model. Don't move to
+        // next model immediately because the next model is usually under
+        // the same demand pressure.
+        if (isTransientUnavailable(err) && attempt < 2) {
+          const waitMs = 5000 + attempt * 8000 // 5s, 13s
+          logger.info(`gemini: ${modelName} overloaded (503) — waiting ${Math.round(waitMs / 1000)}s before retry`)
+          await new Promise(resolve => setTimeout(resolve, waitMs))
+          continue
+        }
+
+        // Other error — log compact summary and try next model
+        logger.info(`gemini: ${modelName} failed (${shortErr(err)}) — trying next model`)
         break
       }
     }
@@ -703,40 +739,50 @@ Return ONLY valid JSON (no markdown):
   const visionModels = VISION_MODEL_CHAIN
 
   for (const visionModel of visionModels) {
-    try {
-      logger.info(`gemini: planPageInteractions via ${visionModel} for ${pageUrl}`)
+    // Up to 3 attempts per model with backoff on 503 overload.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt === 0) {
+          logger.info(`gemini: planPageInteractions via ${visionModel} for ${pageUrl}`)
+        }
+        const text = await withTimeout(
+          callGeminiVision(visionModel, prompt, screenshotBase64),
+          25_000,
+          `gemini:planPageInteractions:${visionModel}`,
+        )
+        const jsonText = extractJson(text)
+        const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
+        const stepsArray = Array.isArray(raw.steps) ? raw.steps : (Array.isArray(raw) ? raw : [])
 
-      const text = await withTimeout(
-        callGeminiVision(visionModel, prompt, screenshotBase64),
-        30_000,
-        `gemini:planPageInteractions:${visionModel}`
-      )
-      const jsonText = extractJson(text)
-      const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
-      const stepsArray = Array.isArray(raw.steps) ? raw.steps : (Array.isArray(raw) ? raw : [])
+        if (stepsArray.length === 0) {
+          logger.info(`planPageInteractions: ${visionModel} returned empty steps`)
+          break // try next model
+        }
 
-      if (stepsArray.length === 0) {
-        logger.warn(`planPageInteractions: ${visionModel} returned empty steps for ${pageUrl}`)
-        continue
+        const steps = (stepsArray as unknown[])
+          .map((s: unknown, i: number) => repairDemoStep(s, i, pageUrl))
+          .filter((s) => s.action !== 'navigate')
+          .slice(0, 6)
+        logger.info(`gemini: planPageInteractions: ${steps.length} in-page steps`)
+        return steps
+      } catch (err) {
+        if (isQuotaExhausted(err)) {
+          logger.info(`planPageInteractions: ${visionModel} quota exhausted, trying next model`)
+          break
+        }
+        if (isTransientUnavailable(err) && attempt < 2) {
+          const waitMs = 4000 + attempt * 8000
+          logger.info(`planPageInteractions: ${visionModel} overloaded — waiting ${Math.round(waitMs / 1000)}s`)
+          await new Promise((resolve) => setTimeout(resolve, waitMs))
+          continue
+        }
+        logger.info(`planPageInteractions: ${visionModel} failed (${shortErr(err)})`)
+        break
       }
-
-      const steps = (stepsArray as unknown[])
-        .map((s: unknown, i: number) => repairDemoStep(s, i, pageUrl))
-        // Enforce no-navigate at application level (defense in depth vs. prompt adherence)
-        .filter((s) => s.action !== 'navigate')
-        .slice(0, 6)
-      logger.info(`gemini: planPageInteractions: ${steps.length} in-page steps`)
-      return steps
-    } catch (err) {
-      if (isQuotaExhausted(err)) {
-        logger.warn(`planPageInteractions: ${visionModel} quota exhausted, trying next`)
-        continue
-      }
-      logger.warn(`planPageInteractions: ${visionModel} failed`, { error: err })
     }
   }
 
-  logger.warn('planPageInteractions: all vision models failed — emitting inventory-driven fallback')
+  logger.info('planPageInteractions: all vision models unavailable — using inventory-driven fallback')
   return inventoryDrivenFallback(inventory, productName)
 }
 
@@ -850,10 +896,8 @@ export async function regenerateNarrationsFromVision(
   if (scenes.length === 0) return []
 
   const banned = `"unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly"`
-  const out: string[] = []
 
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i]
+  const buildPrompt = (i: number, scene: typeof scenes[number]): string => {
     const positionHint = i === 0
       ? 'This is the HOOK (first scene).'
       : i === scenes.length - 1
@@ -862,12 +906,7 @@ export async function regenerateNarrationsFromVision(
           ? 'This is the proof / category claim before the CTA.'
           : `Middle of arc (${i + 1}/${scenes.length}) — show the product in action.`
 
-    if (!scene.screenshotBase64) {
-      out.push(scene.narration)
-      continue
-    }
-
-    const prompt = `You are writing a single 6-12 word caption for one scene of a silent product demo video.
+    return `You are writing a single 6-12 word caption for one scene of a silent product demo video.
 
 Product: ${productName}
 Tagline: ${understanding.tagline}
@@ -887,29 +926,56 @@ The screenshot below shows the EXACT frame the viewer will see for this scene. W
 6. Does NOT narrate the mechanic ("now we click", "as you can see"). Deliver the value claim.
 
 Return ONLY the caption text. No quotes, no markdown, no JSON, no explanation.`
-
-    let caption: string | null = null
-    for (const visionModel of VISION_MODEL_CHAIN) {
-      try {
-        const text = await withTimeout(
-          callGeminiVision(visionModel, prompt, scene.screenshotBase64),
-          30_000,
-          `gemini:regenerateNarration:${visionModel}`,
-        )
-        const trimmed = text.replace(/^["'`\s]+|["'`\s]+$/g, '').replace(/\n+/g, ' ').trim()
-        if (trimmed && trimmed.length >= 8 && trimmed.length <= 200) {
-          caption = trimmed
-          break
-        }
-      } catch (err) {
-        if (isQuotaExhausted(err)) continue
-        logger.warn(`regenerateNarrationsFromVision: ${visionModel} failed for scene ${i + 1}`, { err })
-      }
-    }
-    out.push(caption ?? scene.narration)
   }
 
-  logger.info(`gemini: regenerated ${out.filter((c, i) => c !== scenes[i].narration).length}/${scenes.length} narrations from screenshots`)
+  /** Regenerates one scene's caption with 503 backoff + model fallback. */
+  async function regenOne(i: number, scene: typeof scenes[number]): Promise<string> {
+    if (!scene.screenshotBase64) return scene.narration
+    const prompt = buildPrompt(i, scene)
+    for (const visionModel of VISION_MODEL_CHAIN) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const text = await withTimeout(
+            callGeminiVision(visionModel, prompt, scene.screenshotBase64),
+            20_000,
+            `gemini:regenNarration:${visionModel}`,
+          )
+          const trimmed = text.replace(/^["'`\s]+|["'`\s]+$/g, '').replace(/\n+/g, ' ').trim()
+          if (trimmed && trimmed.length >= 8 && trimmed.length <= 200) {
+            return trimmed
+          }
+          break // unusable response — try next model
+        } catch (err) {
+          if (isQuotaExhausted(err)) break
+          if (isTransientUnavailable(err) && attempt < 1) {
+            await new Promise((resolve) => setTimeout(resolve, 4000))
+            continue
+          }
+          // Silent fallback: this is best-effort. The original narration is fine.
+          break
+        }
+      }
+    }
+    return scene.narration
+  }
+
+  // Parallelize with a small concurrency window. Sequential calls compound
+  // 503 retry waits across 20 scenes into 30+ minutes; concurrency 4 keeps
+  // wall-clock under ~2 min while staying well below Gemini per-IP limits.
+  const concurrency = 4
+  const out: string[] = new Array(scenes.length)
+  let cursor = 0
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = cursor++
+      if (i >= scenes.length) return
+      out[i] = await regenOne(i, scenes[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, scenes.length) }, () => worker()))
+
+  const changed = out.filter((c, i) => c !== scenes[i].narration).length
+  logger.info(`gemini: regenerated ${changed}/${scenes.length} narrations from screenshots`)
   return out
 }
 
@@ -941,31 +1007,37 @@ If you cannot find a matching element, return null.
 
 Return ONLY valid JSON: {"element_text": "exact text here"} or {"element_text": null}`
 
-  // Vision models to try in order (skip a model instantly if its quota is exhausted)
   const visionModels = VISION_MODEL_CHAIN
 
   for (const visionModel of visionModels) {
-    try {
-      const text = await withTimeout(
-        callGeminiVision(visionModel, prompt, screenshotBase64),
-        30_000,
-        `gemini-vision:${visionModel}`
-      )
-      const jsonText = extractJson(text)
-      const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
-      const result = raw.element_text
-      return typeof result === 'string' && result.length > 0 ? result : null
-    } catch (err) {
-      if (isQuotaExhausted(err)) {
-        logger.warn(`identifyElementOnPage: ${visionModel} quota exhausted, trying next model`)
-        continue
+    // 2 attempts per model — vision-element-id is best-effort and shouldn't
+    // block the recorder on 503 cycles.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const text = await withTimeout(
+          callGeminiVision(visionModel, prompt, screenshotBase64),
+          20_000,
+          `gemini-vision:${visionModel}`,
+        )
+        const jsonText = extractJson(text)
+        const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
+        const result = raw.element_text
+        return typeof result === 'string' && result.length > 0 ? result : null
+      } catch (err) {
+        if (isQuotaExhausted(err)) {
+          logger.info(`identifyElementOnPage: ${visionModel} quota exhausted, trying next model`)
+          break
+        }
+        if (isTransientUnavailable(err) && attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 4000))
+          continue
+        }
+        logger.info(`identifyElementOnPage: ${visionModel} failed (${shortErr(err)})`)
+        break
       }
-      logger.warn(`identifyElementOnPage: ${visionModel} failed`, { error: err })
-      return null
     }
   }
 
-  logger.warn('identifyElementOnPage: all vision models exhausted')
   return null
 }
 

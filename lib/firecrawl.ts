@@ -125,8 +125,11 @@ export async function scrapeUrl(url: string): Promise<string> {
     }
 
     if (!response.ok) {
+      // Don't log a full body dump on retry-able 5xx — the Playwright
+      // fallback handles it and this just bloats the log.
       const body = await response.text().catch(() => '')
-      logger.error('scrapeUrl: non-OK response from Firecrawl', { status: response.status, body: body.slice(0, 300) })
+      const level = response.status >= 500 ? 'info' : 'error'
+      logger[level]('scrapeUrl: Firecrawl declined', { status: response.status, snippet: body.slice(0, 120) })
       throw new Error('Could not access this URL. Please check it is publicly accessible.')
     }
 
@@ -382,7 +385,8 @@ export async function crawlSite(
         }
         return { url, content: markdown.slice(0, CHARS_PER_PAGE) }
       } catch (err) {
-        logger.warn(`crawlSite: failed to scrape ${url}`, { error: err })
+        const msg = err instanceof Error ? err.message.split('\n')[0].slice(0, 160) : String(err).slice(0, 160)
+        logger.info(`crawlSite: skipping ${url} (${msg})`)
         return null
       }
     })

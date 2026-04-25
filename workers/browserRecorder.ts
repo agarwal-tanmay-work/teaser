@@ -398,6 +398,64 @@ async function typeWithJitter(page: Page, text: string): Promise<void> {
 }
 
 /**
+ * Returns true if `text` looks like an input placeholder rather than a real
+ * sample value. The LLM occasionally copies the placeholder into `type_text`
+ * which then types literally and leaves the form invalid (because most React
+ * forms validate on the typed value, not on placeholder visibility).
+ */
+function looksLikePlaceholder(text: string | null | undefined): boolean {
+  if (!text) return true
+  const t = text.trim()
+  if (t.length === 0) return true
+  if (t.length < 3) return true
+  if (/^e\.g\.?\s/i.test(t)) return true
+  if (/\.{3}$/.test(t)) return true // ends in ellipsis
+  if (/^enter\s+/i.test(t)) return true // "Enter your name"
+  if (/^type\s+/i.test(t)) return true
+  if (/^your\s+/i.test(t)) return true // "Your email"
+  return false
+}
+
+/**
+ * Picks a realistic sample value for an input based on its semantic role.
+ * Used when the LLM didn't supply a sensible `type_text` (e.g. it pasted
+ * the placeholder). Mirrors `sampleTypeText` from lib/domInventory.ts but
+ * works without a DomInventoryItem in scope.
+ */
+function fallbackTypeText(elementLabel: string | undefined, productName: string): string {
+  const label = (elementLabel ?? '').toLowerCase()
+  if (/email/.test(label)) return 'demo@example.com'
+  if (/password/.test(label)) return 'demo-password-123'
+  if (/phone|tel/.test(label)) return '+1 555 0123'
+  if (/url|link|website/.test(label)) return 'https://example.com'
+  if (/search|query|find|look/.test(label)) return `${productName.split(' ')[0].toLowerCase()} workflow`
+  if (/name/.test(label)) return 'Acme Corp'
+  if (/message|comment|feedback|describe/.test(label)) {
+    return `Trying ${productName} for our team — looks promising.`
+  }
+  return `Try ${productName}`
+}
+
+/**
+ * Dispatches React-friendly input + change events on the focused element
+ * after typing. Many React forms (controlled inputs) listen for `input`
+ * events to update internal state; without this, the typed value stays
+ * "invisible" to the form validator and submit buttons remain disabled.
+ */
+async function fireReactInputEvents(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      const el = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null
+      if (!el) return
+      const inputEvent = new Event('input', { bubbles: true })
+      const changeEvent = new Event('change', { bubbles: true })
+      el.dispatchEvent(inputEvent)
+      el.dispatchEvent(changeEvent)
+    })
+    .catch(() => {})
+}
+
+/**
  * Best-effort click of any visible "Accept / Close / Got it" popup before
  * falling back to the CSS hide sheet. Clicking is preferable because some
  * sites remount the dialog via JS after a CSS `display:none`.
@@ -751,7 +809,8 @@ async function planLiveSteps(
       .filter((step) => step.action !== 'navigate')
       .slice(0, 6)
   } catch (err) {
-    logger.warn('recorder: live page planning failed, falling back to inventory-driven scroll', { err })
+    const msg = err instanceof Error ? err.message.split('\n')[0].slice(0, 140) : String(err).slice(0, 140)
+    logger.info(`recorder: live planning failed (${msg}) — using inventory fallback`)
     if (inventory.items.length > 0) {
       return injectInventoryInteraction([], inventory, ctx.understanding.product_name)
     }
@@ -851,6 +910,14 @@ async function captureStep(
       case 'click': {
         const locator = await findLocator(page, step.element_to_click)
         if (locator) {
+          // Skip disabled buttons immediately — Playwright's click() retries
+          // for 3 s before timing out, which freezes the recording.
+          const enabled = await locator.isEnabled({ timeout: 500 }).catch(() => true)
+          if (!enabled) {
+            logger.info(`recorder step ${stepIndex}: "${step.element_to_click}" is disabled — skipping click`)
+            elementNotFound = true
+            break
+          }
           try {
             const box = await locator.boundingBox()
             if (box) {
@@ -874,7 +941,7 @@ async function captureStep(
             await pageSettle(page, { networkIdleMs: 3000, settleMs: 600 })
             await markPageReady(page)
           } catch (clickErr) {
-            logger.warn(`recorder step ${stepIndex}: click failed`, { err: clickErr })
+            logger.info(`recorder step ${stepIndex}: click failed (${clickErr instanceof Error ? clickErr.message.split('\n')[0] : String(clickErr)})`)
             elementNotFound = true
           }
         } else {
@@ -882,6 +949,13 @@ async function captureStep(
           logger.info(`recorder step ${stepIndex}: "${step.element_to_click}" not found, trying vision fallback`)
           const fallback = await visionClickFallback(page, step.element_to_click ?? '')
           if (fallback.locator) {
+            const enabled = await fallback.locator.isEnabled({ timeout: 500 }).catch(() => true)
+            if (!enabled) {
+              logger.info(`recorder step ${stepIndex}: vision fallback resolved to disabled element — skipping`)
+              clipStart = t()
+              elementNotFound = true
+              break
+            }
             try {
               clipStart = t()
               if (fallback.elementBox) {
@@ -923,7 +997,17 @@ async function captureStep(
               await page.waitForTimeout(220)
             }
             await locator.click({ timeout: 3000 })
-            await typeWithJitter(page, step.type_text ?? `Try ${ctx.understanding.product_name}`)
+            // Reject placeholder-style type_text; substitute a realistic value.
+            let textToType = step.type_text
+            if (looksLikePlaceholder(textToType)) {
+              textToType = fallbackTypeText(step.element_to_click, ctx.understanding.product_name)
+              logger.info(`recorder step ${stepIndex}: type_text looked like a placeholder, substituting "${textToType}"`)
+            }
+            await typeWithJitter(page, textToType ?? `Try ${ctx.understanding.product_name}`)
+            // Fire input/change so React-controlled forms register the value
+            // and any "submit"/"go" button enables. Without this, the next
+            // click step often sees a disabled CTA.
+            await fireReactInputEvents(page)
             await page.waitForTimeout(650)
           } catch {
             elementNotFound = true
@@ -1315,8 +1399,10 @@ export async function recordProduct(
     const webmPath = await page.video()!.path()
     await context.close()
 
-    // Convert WebM → CFR MP4. The WebM timestamps are wall-clock aligned because
-    // the browser runs in real-time (headed mode, no time-budget tricks).
+    // Convert WebM → CFR MP4. This is an INTERMEDIATE — the final Remotion
+    // render does its own re-encode at high quality. Use a fast preset here
+    // so the conversion takes ~30 s instead of 4 min for a 100 s recording.
+    // The source is screen capture (low-motion, easy to encode).
     const recordingMp4 = path.join(outputDir, 'recording.mp4')
     logger.info(`recorder: converting ${webmPath} → recording.mp4`)
     await spawnFfmpeg(
@@ -1333,7 +1419,7 @@ export async function recordProduct(
           'eq=saturation=0.94:contrast=1.07:brightness=-0.015',
           'colorbalance=rm=0.02:bm=-0.02',
         ].join(','),
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
         '-pix_fmt', 'yuv420p',
         '-fps_mode', 'cfr', '-r', '30',
         '-g', '60',
