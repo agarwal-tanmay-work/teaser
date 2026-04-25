@@ -328,10 +328,10 @@ OUTPUT SCHEMA (return ONLY this JSON, nothing else):
     {
       "step": 5,
       "action": "type",
-      "description": "Type a search query in the search bar",
+      "description": "Type a realistic example into a visible input field",
       "narration": "Watch how fast ProductName finds exactly what you need.",
-      "element_to_click": "Search",
-      "type_text": "quarterly revenue report"
+      "element_to_click": "<exact input label or placeholder from VERIFIED INTERACTIVE ELEMENTS>",
+      "type_text": "<a realistic value matching THIS product's domain — e.g. a search query for a search bar, an email for an email field, a code snippet for a developer tool. NOT 'quarterly revenue' unless the product is actually finance/analytics>"
     }
   ]
 }
@@ -352,16 +352,19 @@ const SCRIPT_SYSTEM_PROMPT = `You are a top-tier scriptwriter for Product Hunt l
 YOUR JOB: Turn a product understanding + demo flow into punchy, concrete, specific caption copy that makes a scroller stop scrolling.
 
 ━━━ NON-NEGOTIABLE NARRATIVE ARC ━━━
-Segment 1 (0-3s): HOOK. A provocative question, a bold claim, or a "what if" framing. Must create a pattern-break in the first 2 seconds. Examples that work: "Your team wastes 3 hours a week on status updates." "What if writing SQL felt like talking?" NEVER open with "Introducing X" or "Meet X".
-Segments 2-3: PROBLEM. Name the specific pain with concrete data or a vivid scene. Not "teams struggle with productivity" — "47% of a dev's week is meetings about meetings."
-Segments 4 through (N-2): PRODUCT IN ACTION. One feature per segment, each line sells the OUTCOME not the feature. "Drag a Figma frame in. Ship a component." beats "Figma integration available." Reference real capabilities from the scraped content.
-Segment N-1: PROOF or CATEGORY STATEMENT. Specific customer type, number, or outcome. "Shipping at 40 teams including Linear and Arc." or "This replaces 4 tools in your stack."
-Segment N (last 2-3s): CTA. Short, urgent, directive. "Try it free — link below." or "Built for teams. Yours today."
+Segment 1 (0-3s): HOOK. A provocative question, a bold claim, or a "what if" framing for THIS product's category. Must create a pattern-break in the first 2 seconds. The hook must come from the scraped product content — its problem, its outcome, its target user. NEVER open with "Introducing X" or "Meet X".
+Segments 2-3: PROBLEM. Name the specific pain THIS product solves, drawn from the scraped content. Use concrete data, a vivid scene, or a number when the source provides one. Avoid generic filler like "teams struggle with productivity".
+Segments 4 through (N-2): PRODUCT IN ACTION. One feature per segment, each line sells the OUTCOME not the feature. The structure to use: "<verb> <product noun>. <Outcome>." Reference real capabilities, surfaces, and verbs taken FROM THE SCRAPED CONTENT for THIS product — never invent integrations, partners, or capabilities. If the product is a fitness app, talk about workouts; if it's a database tool, talk about queries; if it's a design tool, talk about canvases. Match the product's actual domain.
+Segment N-1: PROOF or CATEGORY STATEMENT. Use a customer type, number, or outcome ONLY if it appears in the scraped product content. If no real proof point is available, use a sharp category claim like "This replaces N tools in your stack" — but only when the source content supports it. NEVER fabricate customer names, logos, or numbers.
+Segment N (last 2-3s): CTA. Short, urgent, directive. Match the actual call-to-action wording on the product's site when it's good ("Try it free", "Get started", "Book a demo"); otherwise default to "Try it free — link below."
 
 ━━━ BANNED PHRASES (reject every one of these) ━━━
 "unlock productivity" · "streamline your workflow" · "powerful platform" · "seamless experience" · "revolutionary" · "game-changing" · "next-generation" · "cutting-edge" · "best-in-class" · "world-class" · "robust solution" · "empowers teams" · "takes it to the next level" · "unleash the power" · "supercharge" · "effortlessly" · "at your fingertips" · "the future of X" · "one-stop-shop" · "AI-powered" (unless the product genuinely is — and even then, say what the AI DOES, not that it exists)
 
 If your draft contains any of these, REWRITE it with a specific, concrete claim drawn from the scraped product content.
+
+━━━ DO NOT FABRICATE ENTITIES ━━━
+NEVER mention any company, product, integration, customer name, framework, or platform that does NOT appear in the scraped product content above. No "Linear", "Notion", "Figma", "Vercel", "Stripe", "GitHub", "Slack", "AWS", "Postgres", "Tailwind", or any other proper noun unless it appears verbatim in the scraped content. Numbers (customer counts, ROI figures, time saved) must come from the scraped content too — never invent statistics. If the source has no proof point, use a category claim instead.
 
 ━━━ CAPTION CRAFT RULES ━━━
 - Each narration is ONE sentence, 6–14 words. Short. Declarative. Scanable in 2 seconds.
@@ -731,9 +734,9 @@ ${navRule}
 
 Return ONLY valid JSON (no markdown):
 {"steps": [
-  {"step": 1, "action": "type", "description": "Type a realistic query into the search field", "narration": "Finding insights in ${productName} takes seconds.", "element_to_click": "Search", "type_text": "quarterly revenue"},
-  {"step": 2, "action": "click", "description": "Open the automation feature card", "narration": "Here's how ${productName} automates the workflow.", "element_to_click": "Automated workflows"},
-  {"step": 3, "action": "click", "description": "Click the primary CTA", "narration": "Getting started with ${productName} takes one click.", "element_to_click": "Try it free"}
+  {"step": 1, "action": "type", "description": "Type a realistic value into a visible input", "narration": "Finding what matters in ${productName} takes seconds.", "element_to_click": "<exact input label/placeholder from the inventory>", "type_text": "<a realistic example for THIS product's domain — match the input's purpose>"},
+  {"step": 2, "action": "click", "description": "Open a visible feature card or section", "narration": "Here's how ${productName} delivers the outcome.", "element_to_click": "<exact button/link text from the inventory>"},
+  {"step": 3, "action": "click", "description": "Click the primary CTA visible on this page", "narration": "Getting started with ${productName} takes one click.", "element_to_click": "<exact CTA text from the inventory, e.g. 'Try it free' / 'Get started' / 'Book a demo' — only if visible>"}
 ]}`
 
   const visionModels = VISION_MODEL_CHAIN
@@ -924,6 +927,7 @@ The screenshot below shows the EXACT frame the viewer will see for this scene. W
 4. Avoids these banned phrases: ${banned}.
 5. Uses "${productName}" by name when natural — but not in every caption.
 6. Does NOT narrate the mechanic ("now we click", "as you can see"). Deliver the value claim.
+7. NEVER fabricates company names, customer names, integration names, statistics, or proper nouns that are not visible in the screenshot or present in the product context above. If you can't see it or it isn't in the product context, don't say it.
 
 Return ONLY the caption text. No quotes, no markdown, no JSON, no explanation.`
   }
@@ -1135,6 +1139,7 @@ RULES:
 7. NEVER repeat the same caption. Every single one must be unique.
 8. BANNED: "unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly".
 9. Do NOT describe the mechanic ("now we click", "as you can see"). The video SHOWS that. The caption DELIVERS the value claim.
+10. NEVER add company names, customer names, integration names, frameworks, statistics, or proper nouns that are not already in the input captions or in the product context above. The polish pass tightens existing copy — it does not introduce new entities.
 
 Return ONLY a JSON array of strings, nothing else.`
 

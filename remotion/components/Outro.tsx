@@ -37,12 +37,14 @@ export const Outro: React.FC<OutroProps> = ({ productName, productUrl }) => {
     { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
   );
 
-  // Extract display URL
-  let displayUrl = 'useteaser.com';
+  // Extract display URL — derived purely from the user's productUrl so the
+  // outro always shows the actual product domain (never a hard-coded brand).
+  // Falls back to the bare productName when the URL is missing/invalid.
+  let displayUrl = productName;
   if (productUrl) {
     try {
       displayUrl = new URL(productUrl).hostname.replace(/^www\./, '');
-    } catch { /* fallback */ }
+    } catch { /* keep productName as fallback */ }
   }
 
   return (

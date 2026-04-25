@@ -33,11 +33,14 @@ export const RemotionRoot: React.FC = () => {
   const videoSeconds = INTRO_SECONDS + demoDuration + OUTRO_SECONDS;
   const teaserDurationInFrames = Math.ceil(videoSeconds * FPS);
 
+  // These defaults are ONLY used when previewing this composition inside
+  // Remotion Studio with no inputProps. Production renders override every
+  // field via inputProps coming from the actual job/manifest.
   const defaultTeaserProps: TeaserVideoProps = {
     scenes: [],
-    productName: 'Teaser AI',
-    tagline: 'Record your product effortlessly',
-    productUrl: 'https://useteaser.com',
+    productName: 'Your Product',
+    tagline: 'See it in action',
+    productUrl: '',
   };
 
   return (
@@ -67,7 +70,7 @@ export const RemotionRoot: React.FC = () => {
         fps={FPS}
         width={1920}
         height={1080}
-        defaultProps={{ productName: 'Product', productUrl: 'https://useteaser.com' }}
+        defaultProps={{ productName: 'Your Product', productUrl: '' }}
       />
     </>
   );
