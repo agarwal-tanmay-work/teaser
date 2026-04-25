@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { spawn } from 'child_process'
-import { chromium, type Page } from 'playwright'
+import { chromium, type Locator, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import { getFfmpegPath } from '../lib/ffmpegUtils'
 import { identifyElementOnPage, planPageInteractions } from '../lib/gemini'
@@ -330,19 +330,25 @@ async function markPageLoading(page: Page): Promise<void> {
  * Skipped if the cursor is already near the target.
  */
 async function cursorEntrance(page: Page, targetX: number, targetY: number): Promise<void> {
+  // Defensive: if box geometry was off-screen / negative (e.g. element scrolled
+  // out of view between detection and click), clamp the target to the viewport
+  // so the cursor doesn't drift into invisible space and stutter the recording.
+  const tx = Math.max(8, Math.min(VIDEO_WIDTH - 8, Math.round(targetX)))
+  const ty = Math.max(8, Math.min(VIDEO_HEIGHT - 8, Math.round(targetY)))
   const state = await page
     .evaluate(() => ({
       x: (window as unknown as { __lastMouseX?: number }).__lastMouseX ?? -1,
       y: (window as unknown as { __lastMouseY?: number }).__lastMouseY ?? -1,
     }))
     .catch(() => ({ x: -1, y: -1 }))
-  const dist = state.x < 0 ? Infinity : Math.hypot(targetX - state.x, targetY - state.y)
+  const dist = state.x < 0 ? Infinity : Math.hypot(tx - state.x, ty - state.y)
   if (dist < 200) return // already nearby — skip the entrance, just ease in
 
-  // Pick the nearest edge as the entry point.
-  const fromLeft = targetX < VIDEO_WIDTH / 2
+  // Pick the nearest edge as the entry point. Edge values are intentionally
+  // just outside the viewport so the cursor visibly slides INTO frame.
+  const fromLeft = tx < VIDEO_WIDTH / 2
   const entryX = fromLeft ? -40 : VIDEO_WIDTH + 40
-  const entryY = Math.max(80, Math.min(VIDEO_HEIGHT - 80, targetY + (Math.random() < 0.5 ? -90 : 90)))
+  const entryY = Math.max(80, Math.min(VIDEO_HEIGHT - 80, ty + (Math.random() < 0.5 ? -90 : 90)))
   await page
     .evaluate((pos: { x: number; y: number }) => {
       ;(window as unknown as { __lastMouseX?: number; __lastMouseY?: number }).__lastMouseX = pos.x
@@ -351,10 +357,10 @@ async function cursorEntrance(page: Page, targetX: number, targetY: number): Pro
     .catch(() => {})
   await page.mouse.move(entryX, entryY)
 
-  // Approach: animate to a point ~140 px from target, briefly pause, then
-  // the regular easedMoveTo handles the final settle in the caller.
-  const approachX = targetX + (fromLeft ? -140 : 140)
-  const approachY = targetY + (Math.random() < 0.5 ? -40 : 40)
+  // Approach: animate to a point ~140 px from target (clamped to the viewport),
+  // briefly pause, then the regular easedMoveTo handles the final settle.
+  const approachX = Math.max(8, Math.min(VIDEO_WIDTH - 8, tx + (fromLeft ? -140 : 140)))
+  const approachY = Math.max(8, Math.min(VIDEO_HEIGHT - 8, ty + (Math.random() < 0.5 ? -40 : 40)))
   await easedMoveTo(page, approachX, approachY)
   await page.waitForTimeout(120)
 }
@@ -395,6 +401,35 @@ async function typeWithJitter(page: Page, text: string): Promise<void> {
     await page.keyboard.type(ch)
     await page.waitForTimeout(30 + Math.round(Math.random() * 30))
   }
+}
+
+/**
+ * Strips ASCII control characters and non-printables from a string. Used on
+ * any LLM-supplied text that we type into the live page or write to logs —
+ * defends against terminal-control injection (e.g. ANSI escapes that would
+ * mangle the worker log) and Playwright keyboard.type() crashes on some
+ * unicode control bytes.
+ */
+function sanitizeForType(text: string | null | undefined): string {
+  if (!text) return ''
+  // eslint-disable-next-line no-control-regex
+  return text
+    .replace(/[\x00-\x1f\x7f]/g, ' ') // ASCII control chars → space
+    // eslint-disable-next-line no-misleading-character-class
+    .replace(/[\u200B-\u200D\uFEFF]/g, '') // zero-width chars
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200)
+}
+
+/**
+ * Sanitises a string before logging. Prevents LLM-supplied text or page
+ * content from injecting newlines/escape sequences into the worker log.
+ */
+function sanitizeForLog(text: string | null | undefined, max = 80): string {
+  if (!text) return ''
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
 /**
@@ -453,6 +488,31 @@ async function fireReactInputEvents(page: Page): Promise<void> {
       el.dispatchEvent(changeEvent)
     })
     .catch(() => {})
+}
+
+/**
+ * Strict interactability check. Playwright's `isEnabled` checks the native
+ * `disabled` attribute and ARIA roles, but it misses three cases that show
+ * up frequently in real React apps:
+ *   1. `aria-disabled="true"` on a non-button element used as a button
+ *   2. A `.disabled` / `.is-disabled` CSS class with no native attribute
+ *   3. `readOnly` inputs (we don't want to "type" into a read-only field)
+ * Returns true if the element is safe to click/type into.
+ */
+async function isInteractable(locator: Locator, kind: 'click' | 'type' = 'click'): Promise<boolean> {
+  const enabled = await locator.isEnabled({ timeout: 500 }).catch(() => true)
+  if (!enabled) return false
+  const flags = await locator
+    .evaluate((el: Element, k: 'click' | 'type') => {
+      const node = el as HTMLElement
+      const ariaDisabled = node.getAttribute('aria-disabled') === 'true'
+      const cls = (node.className && typeof node.className === 'string' ? node.className : '').toLowerCase()
+      const classDisabled = /\b(is-disabled|disabled|btn-disabled)\b/.test(cls)
+      const readOnly = k === 'type' && (node as HTMLInputElement).readOnly === true
+      return { ariaDisabled, classDisabled, readOnly }
+    }, kind)
+    .catch(() => ({ ariaDisabled: false, classDisabled: false, readOnly: false }))
+  return !flags.ariaDisabled && !flags.classDisabled && !flags.readOnly
 }
 
 /**
@@ -854,7 +914,7 @@ async function captureStep(
   let targetElement: ElementBox | null = null
   let elementNotFound = false
 
-  const shortLabel = step.element_to_click ? ` → "${step.element_to_click.slice(0, 40)}"` : ''
+  const shortLabel = step.element_to_click ? ` → "${sanitizeForLog(step.element_to_click, 40)}"` : ''
   logger.info(`recorder step ${stepIndex}: ${step.action}${shortLabel}`)
 
   try {
@@ -911,10 +971,10 @@ async function captureStep(
         const locator = await findLocator(page, step.element_to_click)
         if (locator) {
           // Skip disabled buttons immediately — Playwright's click() retries
-          // for 3 s before timing out, which freezes the recording.
-          const enabled = await locator.isEnabled({ timeout: 500 }).catch(() => true)
-          if (!enabled) {
-            logger.info(`recorder step ${stepIndex}: "${step.element_to_click}" is disabled — skipping click`)
+          // for 3 s before timing out, which freezes the recording. We also
+          // catch aria-disabled and CSS-disabled elements that isEnabled misses.
+          if (!(await isInteractable(locator, 'click'))) {
+            logger.info(`recorder step ${stepIndex}: "${sanitizeForLog(step.element_to_click, 40)}" is disabled — skipping click`)
             elementNotFound = true
             break
           }
@@ -949,8 +1009,7 @@ async function captureStep(
           logger.info(`recorder step ${stepIndex}: "${step.element_to_click}" not found, trying vision fallback`)
           const fallback = await visionClickFallback(page, step.element_to_click ?? '')
           if (fallback.locator) {
-            const enabled = await fallback.locator.isEnabled({ timeout: 500 }).catch(() => true)
-            if (!enabled) {
+            if (!(await isInteractable(fallback.locator, 'click'))) {
               logger.info(`recorder step ${stepIndex}: vision fallback resolved to disabled element — skipping`)
               clipStart = t()
               elementNotFound = true
@@ -983,6 +1042,11 @@ async function captureStep(
       case 'type': {
         const locator = await findLocator(page, step.element_to_click)
         if (locator) {
+          if (!(await isInteractable(locator, 'type'))) {
+            logger.info(`recorder step ${stepIndex}: "${sanitizeForLog(step.element_to_click, 40)}" is read-only/disabled — skipping type`)
+            elementNotFound = true
+            break
+          }
           try {
             const box = await locator.boundingBox()
             if (box) {
@@ -1001,9 +1065,10 @@ async function captureStep(
             let textToType = step.type_text
             if (looksLikePlaceholder(textToType)) {
               textToType = fallbackTypeText(step.element_to_click, ctx.understanding.product_name)
-              logger.info(`recorder step ${stepIndex}: type_text looked like a placeholder, substituting "${textToType}"`)
+              logger.info(`recorder step ${stepIndex}: type_text looked like a placeholder, substituting "${sanitizeForLog(textToType)}"`)
             }
-            await typeWithJitter(page, textToType ?? `Try ${ctx.understanding.product_name}`)
+            const safeText = sanitizeForType(textToType ?? `Try ${ctx.understanding.product_name}`)
+            await typeWithJitter(page, safeText.length > 0 ? safeText : `Try ${ctx.understanding.product_name}`)
             // Fire input/change so React-controlled forms register the value
             // and any "submit"/"go" button enables. Without this, the next
             // click step often sees a disabled CTA.

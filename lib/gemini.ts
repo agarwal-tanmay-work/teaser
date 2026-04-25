@@ -928,26 +928,59 @@ The screenshot below shows the EXACT frame the viewer will see for this scene. W
 Return ONLY the caption text. No quotes, no markdown, no JSON, no explanation.`
   }
 
-  /** Regenerates one scene's caption with 503 backoff + model fallback. */
-  async function regenOne(i: number, scene: typeof scenes[number]): Promise<string> {
+  /**
+   * Cleans a caption response from Gemini. Defensive against the model
+   * returning JSON/markdown despite the prompt asking for raw text.
+   */
+  function sanitizeCaption(raw: string): string | null {
+    if (!raw) return null
+    let s = raw
+    // If wrapped in JSON object, try to extract a string value field.
+    if (s.trim().startsWith('{')) {
+      try {
+        const obj = JSON.parse(s.trim()) as Record<string, unknown>
+        const candidate = obj.caption ?? obj.narration ?? obj.text ?? obj.value
+        if (typeof candidate === 'string') s = candidate
+      } catch {
+        /* fall through */
+      }
+    }
+    // Strip code fences.
+    s = s.replace(/^```[a-z]*\s*/i, '').replace(/```$/i, '')
+    // Drop surrounding quotes/backticks.
+    s = s.replace(/^["'`\s]+|["'`\s]+$/g, '')
+    // Collapse newlines + tabs to single space (captions are one line).
+    s = s.replace(/[\r\n\t]+/g, ' ')
+    // Strip ASCII control characters (\x00-\x1f, \x7f) that could break
+    // Remotion text rendering or terminal logging.
+    s = s.replace(/[\x00-\x1f\x7f]/g, '')
+    s = s.trim()
+    if (s.length < 8 || s.length > 200) return null
+    return s
+  }
+
+  /** Regenerates one scene's caption with 503 backoff + model fallback.
+   *  `deadline` is an absolute ms timestamp — bail immediately past it so
+   *  one slow scene doesn't drag the whole pass past its budget. */
+  async function regenOne(i: number, scene: typeof scenes[number], deadline: number): Promise<string> {
     if (!scene.screenshotBase64) return scene.narration
     const prompt = buildPrompt(i, scene)
     for (const visionModel of VISION_MODEL_CHAIN) {
+      if (Date.now() >= deadline) return scene.narration
       for (let attempt = 0; attempt < 2; attempt++) {
+        if (Date.now() >= deadline) return scene.narration
         try {
           const text = await withTimeout(
             callGeminiVision(visionModel, prompt, scene.screenshotBase64),
             20_000,
             `gemini:regenNarration:${visionModel}`,
           )
-          const trimmed = text.replace(/^["'`\s]+|["'`\s]+$/g, '').replace(/\n+/g, ' ').trim()
-          if (trimmed && trimmed.length >= 8 && trimmed.length <= 200) {
-            return trimmed
-          }
+          const cleaned = sanitizeCaption(text)
+          if (cleaned) return cleaned
           break // unusable response — try next model
         } catch (err) {
           if (isQuotaExhausted(err)) break
-          if (isTransientUnavailable(err) && attempt < 1) {
+          if (isTransientUnavailable(err) && attempt < 1 && Date.now() + 4000 < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 4000))
             continue
           }
@@ -962,20 +995,30 @@ Return ONLY the caption text. No quotes, no markdown, no JSON, no explanation.`
   // Parallelize with a small concurrency window. Sequential calls compound
   // 503 retry waits across 20 scenes into 30+ minutes; concurrency 4 keeps
   // wall-clock under ~2 min while staying well below Gemini per-IP limits.
+  // Outer deadline guards against pathological model unavailability.
   const concurrency = 4
+  const overallBudgetMs = 4 * 60_000 // 4 minutes for the whole regen pass
+  const deadline = Date.now() + overallBudgetMs
   const out: string[] = new Array(scenes.length)
+  // Pre-fill so workers that bail early still leave a usable narration.
+  for (let i = 0; i < scenes.length; i++) out[i] = scenes[i].narration
   let cursor = 0
   async function worker(): Promise<void> {
     while (true) {
       const i = cursor++
       if (i >= scenes.length) return
-      out[i] = await regenOne(i, scenes[i])
+      if (Date.now() >= deadline) {
+        // Leave remaining scenes as their original narrations.
+        return
+      }
+      out[i] = await regenOne(i, scenes[i], deadline)
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, scenes.length) }, () => worker()))
 
   const changed = out.filter((c, i) => c !== scenes[i].narration).length
-  logger.info(`gemini: regenerated ${changed}/${scenes.length} narrations from screenshots`)
+  const elapsed = Math.round((Date.now() - (deadline - overallBudgetMs)) / 1000)
+  logger.info(`gemini: regenerated ${changed}/${scenes.length} narrations from screenshots (${elapsed}s)`)
   return out
 }
 

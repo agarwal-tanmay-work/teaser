@@ -89,8 +89,13 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
       let inputCount = 0
       let searchCount = 0
 
+      // Hard cap per kind so a degenerate page (e.g. 5000 buttons) doesn't
+      // spike CPU or stall the recording. Items shortlist is already capped
+      // at 24 below; this caps the *scan* itself at 200 per kind.
+      const MAX_SCAN_PER_KIND = 200
+
       // Buttons — both <button> and role=button
-      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, MAX_SCAN_PER_KIND)
       for (const el of buttons) {
         if (!isVisible(el)) continue
         const text = cleanText(el)
@@ -113,7 +118,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
 
       // Same-origin links
       const origin = location.origin
-      const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+      const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]')).slice(0, MAX_SCAN_PER_KIND)
       for (const el of links) {
         if (!isVisible(el)) continue
         const text = cleanText(el)
@@ -143,7 +148,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
       // Inputs and textareas
       const inputs = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
         'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]), textarea, [contenteditable="true"]'
-      ))
+      )).slice(0, MAX_SCAN_PER_KIND)
       for (const el of inputs) {
         if (!isVisible(el)) continue
         const placeholder = (el as HTMLInputElement).placeholder ?? ''
