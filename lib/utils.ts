@@ -117,3 +117,104 @@ export function frameBrightness(buf: Buffer): number {
   if (count === 0) return 0.5
   return sum / (count * 255)
 }
+
+/**
+ * 32-bin viewport entropy histogram derived from byte samples in a JPEG buffer.
+ * Coarse approximation: the compressed stream's mid-section reflects DCT
+ * coefficients, which correlate (loosely) with luminance distribution. Two
+ * frames whose histograms are similar by KL divergence are likely showing the
+ * same content even if perceptual hashes drift. Confirms loop detection.
+ *
+ * Returns a normalised probability distribution (sums to 1).
+ */
+export function viewportEntropy(buf: Buffer): number[] {
+  const bins = 32
+  const hist = new Array<number>(bins).fill(0)
+  if (buf.length < 1024) return hist.map(() => 1 / bins)
+  const start = 512
+  const end = Math.min(buf.length - 4, start + 8192)
+  let total = 0
+  for (let i = start; i < end; i += 4) {
+    const v = buf[i]
+    const idx = Math.min(bins - 1, (v >> 3))
+    hist[idx]++
+    total++
+  }
+  if (total === 0) return hist.map(() => 1 / bins)
+  // Laplace-smooth so KL divergence is well-defined when a bin is empty.
+  const eps = 1e-6
+  return hist.map((c) => (c + eps) / (total + bins * eps))
+}
+
+/**
+ * Symmetric-ish KL divergence between two distributions of equal length.
+ * Used as a confirmation signal alongside perceptual-hash similarity for
+ * loop detection: low KL + high phash similarity → frames are converging.
+ *
+ * Caller passes Laplace-smoothed distributions (see `viewportEntropy`) so
+ * neither side has a true zero; we still guard with `Math.max(eps, …)`.
+ */
+export function klDivergence(p: number[], q: number[]): number {
+  if (p.length !== q.length || p.length === 0) return Infinity
+  const eps = 1e-9
+  let sum = 0
+  for (let i = 0; i < p.length; i++) {
+    const pi = Math.max(eps, p[i])
+    const qi = Math.max(eps, q[i])
+    sum += pi * Math.log(pi / qi)
+  }
+  return sum
+}
+
+/**
+ * Counts of result-bearing nodes + total visible text length on the current
+ * page. Used as a cheap "did the page change after a commit?" signal.
+ *
+ * This helper is intended to be invoked inside `page.evaluate` — Playwright
+ * serialises it across the boundary, so it must be self-contained (no
+ * imports, no closure captures). Selector list focuses on common
+ * search-result / chat-response / form-confirmation surfaces.
+ */
+export function domFingerprintScript(): { nodeCount: number; textLength: number } {
+  const selectors = [
+    '[role=row]',
+    '[role=listitem]',
+    'li',
+    'article',
+    '.result',
+    '[data-result]',
+    '[aria-live]',
+    '[role=status]',
+  ]
+  let nodeCount = 0
+  let textLength = 0
+  for (const sel of selectors) {
+    const nodes = document.querySelectorAll(sel)
+    nodeCount += nodes.length
+    nodes.forEach((n) => {
+      const t = (n as HTMLElement).innerText
+      if (t) textLength += t.length
+    })
+  }
+  return { nodeCount, textLength }
+}
+
+/** A fingerprint sample comparable across before/after of a commit step. */
+export interface DomFingerprint {
+  url: string
+  nodeCount: number
+  textLength: number
+}
+
+/**
+ * Returns true when two fingerprints differ enough that a viewer would notice.
+ * Threshold chosen to ignore micro-DOM jitter (timestamps, focus rings) while
+ * still firing on the typical "search results appeared" delta (≥3 nodes or
+ * ≥200 chars of new visible text).
+ */
+export function fingerprintsDiffer(before: DomFingerprint, after: DomFingerprint): boolean {
+  if (before.url !== after.url) return true
+  const nodeDelta = Math.abs(after.nodeCount - before.nodeCount)
+  const textDelta = Math.abs(after.textLength - before.textLength)
+  return nodeDelta >= 3 || textDelta >= 200
+}

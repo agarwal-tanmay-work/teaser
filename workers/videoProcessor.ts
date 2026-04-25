@@ -332,6 +332,7 @@ RETRY POLICY:
             pageUrl: string
             clips: Array<{ start: number; end: number }>
             screenshotPath?: string
+            outcomeScreenshotPath?: string
           }>
           [key: string]: unknown
         }
@@ -357,10 +358,15 @@ RETRY POLICY:
         // matches what is actually visible.
         await updateProgress(jobId, 62, 'Matching captions to your video...')
         const visionScenes = manifest.scenes.map((s) => {
+          // Prefer the post-commit reveal frame for type scenes — the caption
+          // should describe the OUTCOME the viewer sees (search results, AI
+          // response) rather than the typing-finish moment. Falls back to the
+          // mid-clip reference frame when no outcome was captured.
+          const preferredPath = s.outcomeScreenshotPath ?? s.screenshotPath
           let screenshotBase64: string | undefined
-          if (s.screenshotPath && fs.existsSync(s.screenshotPath)) {
+          if (preferredPath && fs.existsSync(preferredPath)) {
             try {
-              screenshotBase64 = fs.readFileSync(s.screenshotPath).toString('base64')
+              screenshotBase64 = fs.readFileSync(preferredPath).toString('base64')
             } catch {
               screenshotBase64 = undefined
             }

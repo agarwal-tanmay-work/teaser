@@ -32,6 +32,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
         height: number
         primaryCta?: boolean
         inputType?: string
+        resolvedHref?: string
       }>
     } => {
       const PRIMARY_RE = /^(sign up|sign in|signup|signin|log in|login|try|try it|try free|start|start free|start now|get started|get a demo|book|book a demo|launch|create|generate|continue|next|join|register|free trial|see demo|watch demo|learn more|explore)/i
@@ -82,7 +83,28 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
         height: number
         primaryCta?: boolean
         inputType?: string
+        resolvedHref?: string
       }> = []
+
+      // Best-effort URL extraction from a button: data-href, formaction, or
+      // a literal http(s) URL inside an inline onclick handler. The runtime's
+      // click gate uses this to skip clicks that would land on a forbidden URL.
+      const extractButtonHref = (el: Element): string | undefined => {
+        const dataHref = el.getAttribute('data-href')
+        if (dataHref) {
+          try { return new URL(dataHref, location.href).toString() } catch { /* ignore */ }
+        }
+        const formAction = el.getAttribute('formaction')
+        if (formAction) {
+          try { return new URL(formAction, location.href).toString() } catch { /* ignore */ }
+        }
+        const onclick = el.getAttribute('onclick') ?? ''
+        const m = onclick.match(/https?:\/\/[^\s'"`)]+/)
+        if (m) {
+          try { return new URL(m[0]).toString() } catch { /* ignore */ }
+        }
+        return undefined
+      }
 
       let buttonCount = 0
       let linkCount = 0
@@ -112,6 +134,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
             width: Math.round(r.width),
             height: Math.round(r.height),
             primaryCta: PRIMARY_RE.test(text),
+            resolvedHref: extractButtonHref(el),
           })
         }
       }
@@ -123,9 +146,11 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
         if (!isVisible(el)) continue
         const text = cleanText(el)
         if (!text || text.length < 2 || SKIP_RE.test(text)) continue
+        let resolvedHref: string | undefined
         try {
           const url = new URL(el.href)
           if (url.origin !== origin) continue
+          resolvedHref = url.toString()
         } catch {
           continue
         }
@@ -141,6 +166,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
             width: Math.round(r.width),
             height: Math.round(r.height),
             primaryCta: PRIMARY_RE.test(text),
+            resolvedHref,
           })
         }
       }
@@ -188,6 +214,7 @@ export async function scanDomInventory(page: Page): Promise<DomInventory> {
       box: { x: it.x, y: it.y, width: it.width, height: it.height },
       primaryCta: it.primaryCta,
       inputType: it.inputType as DomInventoryItem['inputType'],
+      resolvedHref: it.resolvedHref,
     }))
 
     // Rank items: primary CTAs first, then search, then inputs, then buttons, then links.
@@ -239,6 +266,69 @@ export function inventoryDigest(inv: DomInventory): string {
   const summary = counts.length ? counts.join(', ') : 'no obvious interactive elements'
   const cta = inv.primaryCta ? ` Primary CTA: "${inv.primaryCta.text}".` : ''
   const top = inv.items.slice(0, 6).map((it) => `${it.kind} "${it.text}"`).join(', ')
+  return `${summary}.${cta}${top ? ` Top elements: ${top}.` : ''}`
+}
+
+/**
+ * Drops items from the inventory whose `resolvedHref` belongs to a forbidden
+ * destination. This is the hard gate that prevents the planner from ever
+ * proposing "click Home" / "click Logo" / "click Pricing" once those URLs
+ * have been visited and explored. The recorder calls this before every
+ * planner request so the model literally cannot suggest a forbidden click.
+ */
+export function filterInventory(
+  inv: DomInventory,
+  forbiddenKeys: Set<string>,
+  urlKey: (u: string) => string,
+): DomInventory {
+  if (forbiddenKeys.size === 0) return inv
+  const allowed = inv.items.filter((it) => {
+    if (!it.resolvedHref) return true
+    try {
+      return !forbiddenKeys.has(urlKey(it.resolvedHref))
+    } catch {
+      return true
+    }
+  })
+  const primaryCta = inv.primaryCta && allowed.includes(inv.primaryCta) ? inv.primaryCta : (
+    allowed.find((it) => it.primaryCta && (it.kind === 'button' || it.kind === 'link')) ?? null
+  )
+  return {
+    buttonCount: inv.buttonCount,
+    linkCount: inv.linkCount,
+    inputCount: inv.inputCount,
+    searchCount: inv.searchCount,
+    primaryCta,
+    items: allowed,
+  }
+}
+
+/**
+ * Prompt-ready summary that renders each link with its destination path so the
+ * planner sees `link "Pricing" (→ /pricing)` instead of just `link "Pricing"`.
+ * The destination annotation tightens grounding and makes the post-filter list
+ * self-documenting (every link shown is, by construction, a non-forbidden one).
+ */
+export function inventoryDigestWithDestinations(inv: DomInventory, baseUrl: string): string {
+  const counts: string[] = []
+  if (inv.buttonCount) counts.push(`${inv.buttonCount} button${inv.buttonCount === 1 ? '' : 's'}`)
+  if (inv.linkCount) counts.push(`${inv.linkCount} link${inv.linkCount === 1 ? '' : 's'}`)
+  if (inv.inputCount) counts.push(`${inv.inputCount} input${inv.inputCount === 1 ? '' : 's'}`)
+  if (inv.searchCount) counts.push(`${inv.searchCount} search field${inv.searchCount === 1 ? '' : 's'}`)
+  const summary = counts.length ? counts.join(', ') : 'no obvious interactive elements'
+  const cta = inv.primaryCta ? ` Primary CTA: "${inv.primaryCta.text}".` : ''
+  let base: URL | null = null
+  try { base = new URL(baseUrl) } catch { /* leave null */ }
+  const top = inv.items.slice(0, 8).map((it) => {
+    let dest = ''
+    if (it.resolvedHref) {
+      try {
+        const u = new URL(it.resolvedHref)
+        dest = base && u.origin === base.origin ? ` (→ ${u.pathname || '/'})` : ` (→ ${u.toString()})`
+      } catch { /* ignore */ }
+    }
+    return `${it.kind} "${it.text}"${dest}`
+  }).join(', ')
   return `${summary}.${cta}${top ? ` Top elements: ${top}.` : ''}`
 }
 

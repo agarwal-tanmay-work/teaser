@@ -5,9 +5,17 @@ import { spawn } from 'child_process'
 import { chromium, type Locator, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import { getFfmpegPath } from '../lib/ffmpegUtils'
-import { identifyElementOnPage, planPageInteractions } from '../lib/gemini'
-import { scanDomInventory, sampleTypeText } from '../lib/domInventory'
-import { perceptualHash, hashSimilarity } from '../lib/utils'
+import { identifyElementOnPage, planPageInteractions, planBeatSteps, proposeBeat } from '../lib/gemini'
+import { scanDomInventory, sampleTypeText, filterInventory } from '../lib/domInventory'
+import {
+  perceptualHash,
+  hashSimilarity,
+  viewportEntropy,
+  klDivergence,
+  domFingerprintScript,
+  fingerprintsDiffer,
+  type DomFingerprint,
+} from '../lib/utils'
 import type {
   ProductUnderstanding,
   DemoStep,
@@ -16,6 +24,8 @@ import type {
   ElementBox,
   VideoLength,
   DomInventory,
+  DomInventoryItem,
+  DemoBeat,
 } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
@@ -675,6 +685,10 @@ interface StepContext {
   /** URL of the initial entry page. We refuse to navigate back to this after
    *  the seed steps complete, which kills the homepage-loop-back symptom. */
   entryUrl: string
+  /** URL keys (host+pathname) the runtime refuses to navigate to during the
+   *  live phase. Pre-seeded with the entry URL before seed steps run, so a
+   *  homepage-link click in the seed phase can't drop us back to landing. */
+  forbiddenRevisits: Set<string>
 }
 
 /** Normalises a URL to `host+pathname` for siteMap membership checks. */
@@ -897,6 +911,169 @@ async function handlePageAfterScene(ctx: StepContext): Promise<void> {
   await expandAllowedPaths(ctx.page, ctx.allowedPaths, ctx.productOrigin)
 }
 
+/** Sample a fingerprint of the current page for before/after change detection. */
+async function samplePageFingerprint(page: Page): Promise<DomFingerprint> {
+  try {
+    const fp = await page.evaluate(domFingerprintScript)
+    return { url: page.url(), nodeCount: fp.nodeCount, textLength: fp.textLength }
+  } catch {
+    return { url: page.url(), nodeCount: 0, textLength: 0 }
+  }
+}
+
+/** Patterns we treat as commit triggers when a sibling button sits next to an input. */
+const COMMIT_BUTTON_RE = /^(send|submit|search|go|ask|run|generate|enter|create|add|save|continue|→|↵|⏎|🔍)$/i
+
+/**
+ * Commits typed input by triggering the most likely "go" affordance:
+ *   1. nearest enclosing form's submit button
+ *   2. a sibling button matching COMMIT_BUTTON_RE (right of or below the input)
+ *   3. chat-style send-icon button when the input is a textarea / chat placeholder
+ *   4. Enter key (search-style inputs, default fallback)
+ *   5. blur (last resort for forms that validate on blur)
+ *
+ * Returns the kind of commit that fired so the runtime can log + decide whether
+ * to wait on a network response.
+ */
+async function commitInput(
+  page: Page,
+  locator: Locator,
+  inventory: DomInventory | undefined,
+): Promise<'form-submit' | 'sibling-button' | 'enter' | 'blur' | 'skipped'> {
+  try {
+    // 1. Form ancestor — click its submit button.
+    const formSubmit = await locator.evaluate((el): { x: number; y: number } | null => {
+      const form = (el as HTMLElement).closest('form')
+      if (!form) return null
+      const btn = form.querySelector<HTMLElement>('button[type=submit], input[type=submit], button:not([type])')
+      if (!btn) return null
+      const r = btn.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return null
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    }).catch(() => null)
+    if (formSubmit) {
+      await page.mouse.click(formSubmit.x, formSubmit.y, { delay: 60 }).catch(() => { })
+      return 'form-submit'
+    }
+
+    // 2. Sibling submit button from inventory — text matches commit pattern AND
+    // box sits within 240px right-of or below the input.
+    const inputBox = await locator.boundingBox().catch(() => null)
+    if (inputBox && inventory) {
+      const inputCx = inputBox.x + inputBox.width / 2
+      const inputCy = inputBox.y + inputBox.height / 2
+      const sibling = inventory.items.find((it: DomInventoryItem) => {
+        if (it.kind !== 'button') return false
+        if (!COMMIT_BUTTON_RE.test(it.text.trim())) return false
+        const dx = it.box.x - inputCx
+        const dy = it.box.y - inputCy
+        const horizontal = dx > 0 && dx < 240 && Math.abs(dy) < inputBox.height + 40
+        const vertical = dy > 0 && dy < 200 && Math.abs(dx) < inputBox.width + 80
+        return horizontal || vertical
+      })
+      if (sibling) {
+        await page.mouse.click(sibling.box.x, sibling.box.y, { delay: 60 }).catch(() => { })
+        return 'sibling-button'
+      }
+    }
+
+    // 3-5. Enter key works for search bars, chat inputs, and most forms.
+    await page.keyboard.press('Enter').catch(() => { })
+    return 'enter'
+  } catch {
+    try { await locator.blur().catch(() => { }) } catch { /* ignore */ }
+    return 'blur'
+  }
+}
+
+/**
+ * Race three signals that confirm a commit produced a visible outcome:
+ *   - URL change
+ *   - DOM fingerprint delta (≥3 result-bearing nodes OR ≥200 chars text)
+ *   - networkidle (gated on a request having actually fired post-commit)
+ *
+ * Returns the kind of signal that fired (or 'timeout'), the wall-clock ms
+ * spent waiting, and whether to dwell long (viewer reads the result) or
+ * short (no outcome → don't pad the clip).
+ */
+async function awaitOutcome(
+  page: Page,
+  before: DomFingerprint,
+  ceilingMs: number = 6000,
+): Promise<{ kind: 'url' | 'dom' | 'network' | 'timeout'; dwellMs: number }> {
+  const start = Date.now()
+
+  let networkFired = false
+  const onRequest = (): void => { networkFired = true }
+  page.on('request', onRequest)
+
+  const urlChanged = page
+    .waitForURL((u) => u.toString() !== before.url, { timeout: ceilingMs })
+    .then(() => 'url' as const)
+    .catch(() => null)
+
+  const domChanged = page
+    .waitForFunction(
+      ({ baseline, script }: { baseline: { nodeCount: number; textLength: number }; script: string }) => {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const fn = new Function(`${script}; return domFingerprintScript()`) as () => { nodeCount: number; textLength: number }
+        try {
+          const fp = fn()
+          return Math.abs(fp.nodeCount - baseline.nodeCount) >= 3 || Math.abs(fp.textLength - baseline.textLength) >= 200
+        } catch {
+          return false
+        }
+      },
+      {
+        baseline: { nodeCount: before.nodeCount, textLength: before.textLength },
+        script: domFingerprintScript.toString(),
+      },
+      { timeout: ceilingMs, polling: 250 },
+    )
+    .then(() => 'dom' as const)
+    .catch(() => null)
+
+  const networkIdle = page
+    .waitForLoadState('networkidle', { timeout: ceilingMs })
+    .then(() => (networkFired ? ('network' as const) : null))
+    .catch(() => null)
+
+  const winner = await Promise.race([urlChanged, domChanged, networkIdle, new Promise<null>((r) => setTimeout(() => r(null), ceilingMs + 200))])
+  page.off('request', onRequest)
+
+  const elapsed = Date.now() - start
+  if (winner === 'url' || winner === 'dom' || winner === 'network') {
+    // Random 2.5–3.5s reveal dwell so the viewer can read the result.
+    const dwellMs = 2500 + Math.floor(Math.random() * 1000)
+    return { kind: winner, dwellMs }
+  }
+  // No outcome — short dwell, signal upstream that the beat may need to retry.
+  void elapsed
+  return { kind: 'timeout', dwellMs: 900 }
+}
+
+/**
+ * Returns true when a click did not change the page in any observable way.
+ * Used to skip resetting `scrollOnlyBatches` for inert decorative clicks
+ * (close buttons, expand-collapse toggles that don't change the surface).
+ *
+ * "Same" = identical URL AND no DOM-fingerprint change AND no network request fired
+ * AND perceptual-hash similarity > 0.92 (frame essentially unchanged).
+ */
+function wasDeadInteraction(
+  before: DomFingerprint,
+  after: DomFingerprint,
+  beforeHash: string | undefined,
+  afterHash: string | undefined,
+  networkFired: boolean,
+): boolean {
+  if (networkFired) return false
+  if (before.url !== after.url) return false
+  if (fingerprintsDiffer(before, after)) return false
+  if (!beforeHash || !afterHash) return true
+  return hashSimilarity(beforeHash, afterHash) > 0.92
+}
+
 /**
  * Executes one demo step and writes a scene entry to the manifest.
  * All timeouts are tight — no step should freeze the recording for more
@@ -906,6 +1083,7 @@ async function captureStep(
   ctx: StepContext,
   step: DemoStep,
   stepIndex: number,
+  inventory?: DomInventory,
 ): Promise<SceneCapture> {
   const { page, recordingStartTime } = ctx
   const t = () => Date.now() - recordingStartTime
@@ -913,6 +1091,9 @@ async function captureStep(
   let clipStart = sceneStart
   let targetElement: ElementBox | null = null
   let elementNotFound = false
+  let outcomeKind: SceneCapture['outcomeKind']
+  let outcomeScreenshotPath: string | undefined
+  let clipEndOverrideMs: number | null = null
 
   const shortLabel = step.element_to_click ? ` → "${sanitizeForLog(step.element_to_click, 40)}"` : ''
   logger.info(`recorder step ${stepIndex}: ${step.action}${shortLabel}`)
@@ -978,6 +1159,22 @@ async function captureStep(
             elementNotFound = true
             break
           }
+          // Pre-click href gate: if this is an anchor pointing at a
+          // forbidden URL, refuse the click outright. This is the only
+          // hard guard against a planner-proposed "click Home" / "click
+          // Logo" silently dropping us back on the entry page mid-demo.
+          const elemHref = await locator.evaluate((el) => {
+            const a = el as HTMLAnchorElement
+            return typeof a.href === 'string' ? a.href : null
+          }).catch(() => null)
+          if (elemHref) {
+            const elemKey = urlKey(elemHref)
+            if (elemKey && ctx.forbiddenRevisits.has(elemKey)) {
+              logger.info(`recorder step ${stepIndex}: skipping click on forbidden href ${elemHref}`)
+              elementNotFound = true
+              break
+            }
+          }
           try {
             const box = await locator.boundingBox()
             if (box) {
@@ -1000,6 +1197,18 @@ async function captureStep(
             await locator.click({ timeout: 3000, delay: 60 })
             await pageSettle(page, { networkIdleMs: 3000, settleMs: 600 })
             await markPageReady(page)
+            // Post-click forbidden-landing guard: SPA pushState routes can
+            // navigate without surfacing an href on the element we clicked.
+            // If we landed on a forbidden URL, retreat with goBack() and
+            // mark the scene as a no-op so it isn't kept in the final cut.
+            const landed = page.url()
+            const landedKey = urlKey(landed)
+            if (landedKey && ctx.forbiddenRevisits.has(landedKey)) {
+              logger.info(`recorder step ${stepIndex}: click landed on forbidden URL ${landed} — going back`)
+              await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => { })
+              await pageSettle(page, { networkIdleMs: 2500, settleMs: 500 })
+              elementNotFound = true
+            }
           } catch (clickErr) {
             logger.info(`recorder step ${stepIndex}: click failed (${clickErr instanceof Error ? clickErr.message.split('\n')[0] : String(clickErr)})`)
             elementNotFound = true
@@ -1073,7 +1282,43 @@ async function captureStep(
             // and any "submit"/"go" button enables. Without this, the next
             // click step often sees a disabled CTA.
             await fireReactInputEvents(page)
-            await page.waitForTimeout(650)
+            await page.waitForTimeout(220)
+
+            // Auto-commit + outcome dwell. The single biggest behaviour change
+            // in this rewrite: typing without committing leaves the demo
+            // stranded in front of an input field; viewers need to SEE the
+            // result of what they typed (search results, AI response, form
+            // confirmation). When `skipCommit` is set, the planner has
+            // explicitly opted out (e.g. for partial form fields).
+            if (step.skipCommit !== true) {
+              const before = await samplePageFingerprint(page)
+              const commitKind = await commitInput(page, locator, inventory)
+              logger.info(`recorder step ${stepIndex}: commit fired (${commitKind})`)
+              const ceiling = commitKind === 'enter' || commitKind === 'sibling-button' || commitKind === 'form-submit' ? 6000 : 3000
+              const outcome = await awaitOutcome(page, before, ceiling)
+              outcomeKind = outcome.kind
+              logger.info(`recorder step ${stepIndex}: outcome ${outcome.kind} (dwell ${outcome.dwellMs}ms)`)
+
+              // Modal popups frequently appear after a commit (e.g. "Sign up
+              // to see results"). Dismiss before we capture the outcome frame.
+              await dismissPopups(page).catch(() => { })
+
+              // Capture the post-commit reveal screenshot — this becomes the
+              // canonical frame for caption regeneration on this scene.
+              try {
+                const buf = await page.screenshot({ type: 'jpeg', quality: 70 })
+                outcomeScreenshotPath = path.join(ctx.outputDir, `scene-${String(stepIndex).padStart(3, '0')}-outcome.jpg`)
+                fs.writeFileSync(outcomeScreenshotPath, buf)
+              } catch (err) {
+                logger.warn(`recorder step ${stepIndex}: outcome screenshot failed`, { err })
+              }
+
+              await page.waitForTimeout(outcome.dwellMs)
+              clipEndOverrideMs = t()
+            } else {
+              outcomeKind = 'none'
+              await page.waitForTimeout(450)
+            }
           } catch {
             elementNotFound = true
           }
@@ -1155,18 +1400,25 @@ async function captureStep(
   }
 
   const sceneEnd = t()
+  // For type scenes that successfully committed, pin the clip end to the
+  // moment the outcome reveal completed — not the typing-finish moment —
+  // so the assembler keeps the post-commit reveal frames in the final cut.
+  const clipEnd = clipEndOverrideMs != null ? Math.max(clipEndOverrideMs, sceneEnd) : sceneEnd
   return {
     step: stepIndex,
     action: step.action,
     description: step.description,
     narration: step.narration,
-    clips: [{ start: Math.min(clipStart, sceneEnd), end: sceneEnd }],
+    clips: [{ start: Math.min(clipStart, clipEnd), end: clipEnd }],
     targetElement,
     typeText: step.type_text ?? null,
     elementNotFound,
     pageUrl: page.url(),
     screenshotPath,
     noveltyHash,
+    beatStepRole: step.beatStepRole,
+    outcomeKind,
+    outcomeScreenshotPath,
   }
 }
 
@@ -1282,6 +1534,22 @@ export async function recordProduct(
     const scenes: SceneCapture[] = []
     const visitedUrls: string[] = [page.url()]
 
+    // Pre-seed forbidden URLs BEFORE seed steps run. Locking this in early
+    // means a homepage-link click during the seed phase (or by the live
+    // planner) gets refused at the gate instead of silently dropping us
+    // back on landing. We seed the entry URL and any same-origin alias
+    // (apex ↔ www) so cross-subdomain home clicks are blocked too.
+    const forbiddenRevisits = new Set<string>()
+    const entryKey = urlKey(entryUrl)
+    if (entryKey) forbiddenRevisits.add(entryKey)
+    try {
+      const entryHost = new URL(entryUrl).host
+      const altHost = entryHost.startsWith('www.') ? entryHost.slice(4) : `www.${entryHost}`
+      const altUrl = entryUrl.replace(entryHost, altHost)
+      const altKey = urlKey(altUrl)
+      if (altKey) forbiddenRevisits.add(altKey)
+    } catch { /* ignore */ }
+
     const ctx: StepContext = {
       page,
       recordingStartTime,
@@ -1294,21 +1562,29 @@ export async function recordProduct(
       prerollMs,
       outputDir,
       entryUrl,
+      forbiddenRevisits,
     }
 
-    // ── Execute seed steps, then extend with live screenshot-grounded plans ───
+    // ── Execute seed steps, then extend with beat-driven live planning ───────
     let stepCounter = 0
-    /** URLs we refuse to revisit during the live phase — prevents homepage loop-back. */
-    const forbiddenRevisits = new Set<string>()
     /** Recent novelty hashes — used to detect stuck/looping content. */
     const recentHashes: string[] = []
+    /** Recent viewport-entropy distributions, paired index-wise with recentHashes. */
+    const recentEntropies: number[][] = []
 
-    /** Pushes a scene to the manifest. */
+    /** Pushes a scene to the manifest and updates novelty signal buffers. */
     function pushScene(scene: SceneCapture): void {
       scenes.push(scene)
       if (scene.noveltyHash) {
         recentHashes.push(scene.noveltyHash)
         if (recentHashes.length > 4) recentHashes.shift()
+      }
+      if (scene.screenshotPath) {
+        try {
+          const buf = fs.readFileSync(scene.screenshotPath)
+          recentEntropies.push(viewportEntropy(buf))
+          if (recentEntropies.length > 4) recentEntropies.shift()
+        } catch { /* ignore */ }
       }
     }
 
@@ -1321,133 +1597,186 @@ export async function recordProduct(
       await handlePageAfterScene(ctx)
     }
 
-    // After seed steps complete, lock the entry URL key — never navigate back
-    // to the homepage during the live phase. This is the single biggest fix
-    // for the "video loops back to landing page and replays" symptom.
-    const entryKey = urlKey(entryUrl)
-    if (entryKey) forbiddenRevisits.add(entryKey)
+    // ── Beat-driven live phase ───────────────────────────────────────────────
+    // The recorder now runs a queue of BEATS — each beat is one complete
+    // open→setup→commit→reveal demonstration of a single capability. Beats
+    // come from the model's `proposed_beats` and (when the queue empties)
+    // from adaptive `proposeBeat` calls keyed to the current page.
+    const beatQueue: DemoBeat[] = (understanding.proposed_beats ?? []).map((b) => ({ ...b, status: 'pending', attempts: 0, steps: [] }))
+    const completedBeats: DemoBeat[] = []
+    logger.info(`recorder: beat queue seeded with ${beatQueue.length} beats from understanding`)
 
-    let liveBatch = 0
-    let batchesOnCurrentPage = 0
-    let lastPageUrl = page.url()
-    let scrollOnlyBatches = 0
-    /** Live-batch hard cap — tighter than before because each batch contains
-     *  real interactions (click/type) rather than pure scrolls. */
+    /** Loop detection: tighter than the prior 0.85 / 3-consecutive thresholds.
+     *  We declare "stuck" when the last 2 hashes are >0.78 similar AND the
+     *  entropy distributions are within KL < 0.05 of each other. Two signals
+     *  guards against a single noisy hash collision. */
+    function looksStuck(): boolean {
+      if (recentHashes.length < 2) return false
+      const a = recentHashes[recentHashes.length - 1]
+      const b = recentHashes[recentHashes.length - 2]
+      if (hashSimilarity(a, b) <= 0.78) return false
+      if (recentEntropies.length < 2) return true // hash-only confirmation
+      const ea = recentEntropies[recentEntropies.length - 1]
+      const eb = recentEntropies[recentEntropies.length - 2]
+      return klDivergence(ea, eb) < 0.05
+    }
+
+    /** Validate a planned beat — every commit-bearing goal must produce a
+     *  commit step the runtime will actually fire on. Returns a hint string
+     *  on failure (used to drive a single re-plan retry). */
+    function validatePlanForBeat(steps: DemoStep[], beat: DemoBeat, inv: DomInventory): string | null {
+      if (steps.length === 0) return 'plan returned 0 steps — produce at least one'
+      const goalsRequiringCommit: DemoBeat['goal'][] = ['search', 'form_submit', 'chat_send', 'configure_and_run']
+      if (goalsRequiringCommit.includes(beat.goal)) {
+        const hasCommit = steps.some((s) => s.beatStepRole === 'commit' || s.action === 'type')
+        if (!hasCommit) return `beat goal "${beat.goal}" requires a commit step — include a type or a click on a Submit/Send/Search button`
+      }
+      // Every element_to_click must come from the (filtered) inventory.
+      const allowedTexts = new Set(inv.items.map((it) => it.text))
+      for (const s of steps) {
+        if (s.action === 'click' || s.action === 'type' || s.action === 'hover') {
+          if (s.element_to_click && !allowedTexts.has(s.element_to_click)) {
+            return `step references "${sanitizeForLog(s.element_to_click, 50)}" which is not in the inventory — pick from the listed elements`
+          }
+        }
+      }
+      return null
+    }
+
     const MAX_LIVE_BATCHES = 12
+    let liveBatch = 0
+
+    /** Execute one beat end-to-end. Returns true when work was captured. */
+    async function runOneBeat(beat: DemoBeat): Promise<boolean> {
+      beat.status = 'active'
+      beat.attempts++
+      logger.info(`recorder: running beat ${beat.id} (${beat.goal}) attempt ${beat.attempts} — outcome: ${beat.outcomeDescription}`)
+
+      // Navigate to the beat's target page if specified and allowed.
+      if (beat.targetUrl) {
+        const key = urlKey(beat.targetUrl)
+        const onSamePage = key && urlKey(page.url()) === key
+        if (!onSamePage && key && !ctx.forbiddenRevisits.has(key)) {
+          const navStep: DemoStep = {
+            step: stepCounter + 1,
+            action: 'navigate',
+            description: `Open ${(() => { try { return new URL(beat.targetUrl!).pathname } catch { return beat.targetUrl! } })()}`,
+            narration: `Inside ${understanding.product_name} now.`,
+            navigate_to: beat.targetUrl,
+            beatStepRole: 'open',
+          }
+          const navScene = await captureStep(ctx, navStep, ++stepCounter)
+          navScene.beatId = beat.id
+          pushScene(navScene)
+          await handlePageAfterScene(ctx)
+        }
+      }
+
+      // Scan + filter the inventory. The filter strips items whose
+      // resolvedHref points at a forbidden destination, so the planner
+      // literally cannot suggest "click Home".
+      const rawInventory = await scanDomInventory(page)
+      const inventory = filterInventory(rawInventory, ctx.forbiddenRevisits, (u) => urlKey(u) ?? u)
+      logger.info(
+        `recorder: beat ${beat.id} inventory ${inventory.buttonCount}b/${inventory.linkCount}l/${inventory.inputCount}i/${inventory.searchCount}s ` +
+        `(${rawInventory.items.length - inventory.items.length} filtered as forbidden)`,
+      )
+
+      // Plan via vision; validate; one retry on rejection.
+      const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 })
+      let steps = await planBeatSteps(beat, screenshot.toString('base64'), page.url(), understanding.product_name, understanding, inventory)
+      let rejection = validatePlanForBeat(steps, beat, inventory)
+      if (rejection) {
+        logger.info(`recorder: beat ${beat.id} plan rejected (${rejection}) — retrying once`)
+        steps = await planBeatSteps(beat, screenshot.toString('base64'), page.url(), understanding.product_name, understanding, inventory, rejection)
+        rejection = validatePlanForBeat(steps, beat, inventory)
+        if (rejection) {
+          logger.info(`recorder: beat ${beat.id} plan rejected twice (${rejection}) — abandoning`)
+          beat.status = 'abandoned'
+          completedBeats.push(beat)
+          return false
+        }
+      }
+
+      // Execute the planned steps. Auto-commit + outcome dwell live in case
+      // 'type' inside captureStep, so the runtime captures the reveal even
+      // when the planner only emitted a single type step.
+      let producedAchievement = false
+      for (const s of steps) {
+        if (capturedClipDurationMs(scenes) >= targetDemoMs) break
+        if (Date.now() - recordingStartTime >= maxWallClockMs) break
+        const scene = await captureStep(ctx, s, ++stepCounter, inventory)
+        scene.beatId = beat.id
+        pushScene(scene)
+        await handlePageAfterScene(ctx)
+        if (scene.outcomeKind === 'url' || scene.outcomeKind === 'dom' || scene.outcomeKind === 'network') {
+          producedAchievement = true
+          beat.outcomeScreenshotPath = scene.outcomeScreenshotPath
+        }
+      }
+
+      // Beats that don't require a commit (open_feature, navigate_explore)
+      // are achieved as long as something visible happened; we approximate
+      // that by checking whether at least one step landed without elementNotFound.
+      if (!producedAchievement) {
+        const trailing = scenes[scenes.length - 1]
+        if (trailing?.beatId === beat.id && !trailing.elementNotFound && (beat.goal === 'open_feature' || beat.goal === 'navigate_explore')) {
+          producedAchievement = true
+        }
+      }
+
+      if (producedAchievement) {
+        beat.status = 'achieved'
+        completedBeats.push(beat)
+        logger.info(`recorder: beat ${beat.id} ACHIEVED`)
+        return true
+      }
+
+      if (beat.attempts >= 2) {
+        beat.status = 'abandoned'
+        completedBeats.push(beat)
+        logger.info(`recorder: beat ${beat.id} ABANDONED after ${beat.attempts} attempts`)
+        return false
+      }
+
+      // Re-queue for one more attempt.
+      beat.status = 'pending'
+      beatQueue.unshift(beat)
+      return false
+    }
 
     while (capturedClipDurationMs(scenes) < targetDemoMs) {
-      const wallClockMs = Date.now() - recordingStartTime
-      if (wallClockMs >= maxWallClockMs) {
-        logger.warn(
-          `recorder: hit wall-clock cap with ${Math.round(capturedClipDurationMs(scenes) / 1000)}s clips`,
-        )
+      if (Date.now() - recordingStartTime >= maxWallClockMs) {
+        logger.warn(`recorder: hit wall-clock cap with ${Math.round(capturedClipDurationMs(scenes) / 1000)}s clips`)
         break
       }
       if (liveBatch >= MAX_LIVE_BATCHES) {
         logger.info('recorder: hit live planning batch cap — ending cleanly')
         break
       }
-
-      // Novelty check: if the last 3 scene hashes are highly similar, we're
-      // looping or stuck on a frozen frame. Break cleanly rather than padding
-      // duration with more scrolls.
-      if (recentHashes.length >= 3) {
-        const last = recentHashes[recentHashes.length - 1]
-        const prev1 = recentHashes[recentHashes.length - 2]
-        const prev2 = recentHashes[recentHashes.length - 3]
-        const sim1 = hashSimilarity(last, prev1)
-        const sim2 = hashSimilarity(last, prev2)
-        if (sim1 > 0.85 && sim2 > 0.85) {
-          logger.info('recorder: 3 consecutive near-identical scenes — terminating to avoid loop')
-          break
-        }
+      if (looksStuck()) {
+        logger.info('recorder: novelty + entropy signals say stuck — ending cleanly')
+        break
       }
 
-      // Track whether we're stuck on the same page
-      const currentPageUrl = page.url()
-      if (currentPageUrl === lastPageUrl) {
-        batchesOnCurrentPage++
-      } else {
-        batchesOnCurrentPage = 0
-        scrollOnlyBatches = 0
-        lastPageUrl = currentPageUrl
-      }
-
-      const remainingMs = targetDemoMs - capturedClipDurationMs(scenes)
-      const allowNavigation = (remainingMs > 15_000 && visitedUrls.length < 8) ||
-        batchesOnCurrentPage >= 3
       liveBatch++
-
-      // Scan the live DOM for interactives BEFORE planning. The vision agent
-      // uses this both to bias its action selection toward what's actually
-      // available and to feed deterministic fallbacks if Gemini fails.
-      const inventory = await scanDomInventory(page)
-      logger.info(
-        `recorder: live plan ${liveBatch}/${MAX_LIVE_BATCHES} (${Math.round(remainingMs / 1000)}s clips remaining, ` +
-        `nav ${allowNavigation ? 'on' : 'off'}, batches on page: ${batchesOnCurrentPage}, ` +
-        `inventory: ${inventory.buttonCount}b/${inventory.linkCount}l/${inventory.inputCount}i/${inventory.searchCount}s)`,
-      )
-
-      // Force-navigate to an unvisited page after 2 scroll-only batches —
-      // unless every reachable URL is already exhausted, in which case
-      // terminate rather than loop.
-      if (scrollOnlyBatches >= 2 && siteMap.length > 0) {
-        const unvisited = siteMap.find((u) => {
-          const key = urlKey(u)
-          if (!key) return false
-          if (forbiddenRevisits.has(key)) return false
-          return !visitedUrls.some((v) => urlKey(v) === key)
-        })
-        if (unvisited) {
-          logger.info(`recorder: force-navigating to unvisited page: ${unvisited}`)
-          const navStep: DemoStep = {
-            step: stepCounter + 1,
-            action: 'navigate',
-            description: `Navigate to ${new URL(unvisited).pathname}`,
-            narration: `Now let's see another part of ${understanding.product_name}.`,
-            navigate_to: unvisited,
-          }
-          const scene = await captureStep(ctx, navStep, ++stepCounter)
-          pushScene(scene)
-          await handlePageAfterScene(ctx)
-          batchesOnCurrentPage = 0
-          scrollOnlyBatches = 0
-          lastPageUrl = page.url()
-          continue
-        }
-        // No unvisited URLs left — if the current page has no useful interactives,
-        // terminate cleanly. The user explicitly chose end-cleanly over padding.
-        if (inventory.buttonCount + inventory.inputCount + inventory.searchCount === 0) {
-          logger.info('recorder: subpages exhausted and no interactives left — ending cleanly')
+      let beat = beatQueue.shift()
+      if (!beat) {
+        // Adaptive proposal — if the page has any demo-worthy interactives
+        // we propose one fresh beat keyed to it. If proposeBeat returns null,
+        // there's nothing more to demo and we end cleanly (per plan: "queue
+        // empty + no new beat proposed → ending cleanly").
+        const inv = await scanDomInventory(page)
+        const proposed = await proposeBeat(page.url(), understanding.product_name, understanding, filterInventory(inv, ctx.forbiddenRevisits, (u) => urlKey(u) ?? u))
+        if (!proposed) {
+          logger.info('recorder: beat queue empty + no new beat proposed → ending cleanly')
           break
         }
+        beat = proposed
+        logger.info(`recorder: adaptively proposed beat ${beat.id} (${beat.goal}) on ${page.url()}`)
       }
 
-      const liveSteps = await planLiveSteps(ctx, allowNavigation, inventory)
-      // Track if this batch is scroll-only AFTER all enrichment (rejection
-      // retry, deterministic injection). If we still got pure scrolls,
-      // increment the counter so the next iteration knows to escape this page.
-      if (isScrollOnlyBatch(liveSteps)) {
-        scrollOnlyBatches++
-      } else {
-        scrollOnlyBatches = 0
-      }
-
-      for (const step of liveSteps) {
-        if (capturedClipDurationMs(scenes) >= targetDemoMs) break
-        if (Date.now() - recordingStartTime >= maxWallClockMs) break
-        // Refuse to navigate back to a forbidden URL (entry/homepage).
-        if (step.action === 'navigate' && step.navigate_to) {
-          const key = urlKey(step.navigate_to)
-          if (key && forbiddenRevisits.has(key)) {
-            logger.info(`recorder: skipping navigate to forbidden URL ${step.navigate_to}`)
-            continue
-          }
-        }
-        const scene = await captureStep(ctx, step, ++stepCounter)
-        pushScene(scene)
-        await handlePageAfterScene(ctx)
-      }
+      await runOneBeat(beat)
     }
 
     await page.waitForTimeout(800)
@@ -1508,7 +1837,10 @@ export async function recordProduct(
       totalScenes: scenes.length,
       scenes,
       prerollMs,
+      beats: completedBeats,
     }
+    const achievedCount = completedBeats.filter((b) => b.status === 'achieved').length
+    logger.info(`recorder: beats ran ${completedBeats.length} (${achievedCount} achieved, ${completedBeats.length - achievedCount} abandoned)`)
     fs.writeFileSync(
       path.join(outputDir, 'manifest.json'),
       JSON.stringify(manifest, null, 2),

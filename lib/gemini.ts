@@ -7,6 +7,8 @@ import type {
   ScriptSegment,
   InteractiveInventory,
   DomInventory,
+  DemoBeat,
+  BeatGoal,
 } from '@/types'
 import { logger } from '@/lib/logger'
 import * as https from 'https'
@@ -285,6 +287,16 @@ CRITICAL RULES:
 9. For "type" actions: element_to_click must be an input field label/placeholder from the VERIFIED INTERACTIVE ELEMENTS list. Use realistic example text that demonstrates the product.
 10. After every navigate, include 1-2 click/hover/scroll steps on that page before the next navigate so the viewer sees what's on each page.
 11. PREFER click-based navigation over navigate actions when a nav link exists in the verified elements. Clicking a visible link produces a more natural demo than a hard page load.
+12. ALSO output 2-3 PROPOSED BEATS — each beat is one complete open→setup→commit→reveal demonstration of a single capability the product has. A beat is the unit of demonstration: type into a search field then press Enter and let results render; fill a form then click Submit and let the confirmation render; send a chat message and let the response render. The recorder uses these beats to structure the video around what the product DOES, not just pages it has. Each beat must:
+    - have a "goal" ∈ ["search", "form_submit", "chat_send", "configure_and_run", "open_feature", "navigate_explore"]
+    - have an "outcomeDescription" describing what the viewer will see after the commit (e.g. "search results for the query render below the input")
+    - have a "targetUrl" picked from VERIFIED SUBPAGES (the page where this beat plays out — never the login/signup/auth page)
+    - have an "inputHint" with REALISTIC sample text matching the product's actual domain when the beat involves typing (a search query for a search bar, a chat message for a chat box, a name+email for a form). Domain-match: a database tool gets a query, a fitness app gets a workout name, a design tool gets a project title. Never "test", "hello", "asdf", or "quarterly revenue" unless the product is actually a finance/analytics tool.
+13. ⚠️ USER PRIORITY OVERRIDE: When the ADDITIONAL CONTEXT FROM THE USER block below contains a description and/or "Key features/flows the user specifically wants shown", those answers take ABSOLUTE PRIORITY over your inferred top_5_features. Specifically:
+    - Your proposed_beats MUST cover the user's listed features in the order the user listed them. The first beat demonstrates the user's first stated feature, the second beat their second, etc.
+    - If the user described what the product does, every beat's outcomeDescription must align with that description — do not propose beats demonstrating capabilities the user did not mention if the user-stated features still need coverage.
+    - Your top_5_features list must lead with the features the user named (in their order), then fill the remaining slots with what you inferred from the scraped content.
+    - If the user named a feature you cannot find evidence of in the scraped content, still include it as a beat — pick the closest matching page from VERIFIED SUBPAGES and let the recorder discover the exact UI live.
 
 OUTPUT SCHEMA (return ONLY this JSON, nothing else):
 {
@@ -332,6 +344,18 @@ OUTPUT SCHEMA (return ONLY this JSON, nothing else):
       "narration": "Watch how fast ProductName finds exactly what you need.",
       "element_to_click": "<exact input label or placeholder from VERIFIED INTERACTIVE ELEMENTS>",
       "type_text": "<a realistic value matching THIS product's domain — e.g. a search query for a search bar, an email for an email field, a code snippet for a developer tool. NOT 'quarterly revenue' unless the product is actually finance/analytics>"
+    }
+  ],
+  "proposed_beats": [
+    {
+      "id": "beat-1",
+      "goal": "search",
+      "outcomeDescription": "<what the viewer should see after the commit, e.g. 'a list of search results matching the query renders'>",
+      "targetUrl": "<full URL from VERIFIED SUBPAGES where this beat plays out>",
+      "inputHint": "<realistic, domain-matched sample text for the type step — never 'test' or 'hello'>",
+      "steps": [],
+      "status": "pending",
+      "attempts": 0
     }
   ]
 }
@@ -422,6 +446,55 @@ function repairDemoStep(s: unknown, i: number, productUrl: string): DemoStep {
  * Hyper-flexible repair function for product data.
  * Ensures the pipeline proceeds even if Gemini returns a non-standard structure.
  */
+/** Goals the model is allowed to assign to a beat. Anything else collapses to `open_feature`. */
+const VALID_BEAT_GOALS: ReadonlySet<BeatGoal> = new Set<BeatGoal>([
+  'search',
+  'form_submit',
+  'chat_send',
+  'configure_and_run',
+  'open_feature',
+  'navigate_explore',
+])
+
+/**
+ * Validates and repairs the model's proposed beat list. Beats with missing
+ * required fields are dropped; remaining beats are clamped to a max of 4
+ * (the runtime caps at ~3 anyway, leaving one as a buffer for retries).
+ */
+function repairProposedBeats(raw: unknown[], productName: string, fallbackUrl: string): DemoBeat[] {
+  const out: DemoBeat[] = []
+  for (let i = 0; i < raw.length && out.length < 4; i++) {
+    const b = raw[i] as Record<string, unknown> | null
+    if (!b || typeof b !== 'object') continue
+    const goal = typeof b.goal === 'string' && VALID_BEAT_GOALS.has(b.goal as BeatGoal)
+      ? (b.goal as BeatGoal)
+      : 'open_feature'
+    const outcomeDescription = typeof b.outcomeDescription === 'string' && b.outcomeDescription.trim().length > 0
+      ? b.outcomeDescription.trim()
+      : `the result of trying ${productName} renders on screen`
+    let targetUrl: string | undefined
+    if (typeof b.targetUrl === 'string') {
+      try {
+        targetUrl = new URL(b.targetUrl, fallbackUrl).toString()
+      } catch { /* drop invalid URL */ }
+    }
+    const inputHint = typeof b.inputHint === 'string' && b.inputHint.trim().length > 0
+      ? b.inputHint.trim().slice(0, 80)
+      : undefined
+    out.push({
+      id: typeof b.id === 'string' && b.id.trim() ? b.id.trim() : `beat-${out.length + 1}`,
+      goal,
+      outcomeDescription,
+      targetUrl,
+      inputHint,
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    })
+  }
+  return out
+}
+
 function repairProductUnderstanding(raw: unknown, url: string): ProductUnderstanding {
   const p = (raw as Record<string, unknown>) ?? {}
 
@@ -439,7 +512,8 @@ function repairProductUnderstanding(raw: unknown, url: string): ProductUnderstan
     product_category: (typeof p.product_category === 'string' ? p.product_category : null) ?? 'software',
     problem_being_solved: problemSolved,
     key_pages_to_visit: Array.isArray(p.key_pages_to_visit) ? p.key_pages_to_visit as string[] : [],
-    demo_flow: []
+    demo_flow: [],
+    proposed_beats: Array.isArray(p.proposed_beats) ? repairProposedBeats(p.proposed_beats, productName, url) : [],
   }
 
   // Repair demo flow
@@ -535,10 +609,12 @@ export async function understandProduct(
   inventory?: InteractiveInventory,
 ): Promise<ProductUnderstanding> {
   const userContextParts: string[] = []
-  if (description) userContextParts.push(`Product description: ${description}`)
-  if (features) userContextParts.push(`Key features/flows the user specifically wants shown: ${features}`)
+  if (description) userContextParts.push(`What does the product do? (user's own words): "${description}"`)
+  if (features) userContextParts.push(`Key features/flows the user specifically wants shown (in priority order): "${features}"`)
   const descriptionBlock = userContextParts.length
-    ? `\n\nADDITIONAL CONTEXT FROM THE USER (prioritise these instructions):\n${userContextParts.join('\n\n')}`
+    ? `\n\n━━━ ADDITIONAL CONTEXT FROM THE USER ━━━
+These answers come directly from the founder. They take ABSOLUTE PRIORITY over anything you infer from the scraped content. Your proposed_beats MUST cover the user's listed features in the order they listed them. Your top_5_features must lead with the user's stated features. The demo_flow must visit pages where these features live before any other pages.
+${userContextParts.join('\n')}`
     : ''
 
   // Build the verified subpage URLs block — combine siteMap with inventory subpages
@@ -603,13 +679,71 @@ Remember:
   const text = await generateWithFallback(UNDERSTAND_SYSTEM_PROMPT, prompt)
   const jsonText = extractJson(text)
 
+  let parsed: ProductUnderstanding
   try {
     const raw = JSON.parse(jsonText.replace(/\\n/g, ' '))
-    return repairProductUnderstanding(raw, productUrl)
+    parsed = repairProductUnderstanding(raw, productUrl)
   } catch (err) {
     logger.warn('understandProduct: failed to parse JSON, using fallback repair', { error: err })
-    return repairProductUnderstanding({}, productUrl)
+    parsed = repairProductUnderstanding({}, productUrl)
   }
+
+  // Stamp the verbatim user input on the result so downstream beat planning
+  // can read what the founder asked for, even if the model paraphrased it
+  // in top_5_features. These fields are populated server-side and never
+  // come from the model — the model can't override what the user typed.
+  if (description) parsed.user_description = description
+  if (features) {
+    parsed.user_features = features
+    // Reorder + bias top_5_features and proposed_beats so user-stated
+    // features lead. The recorder will run beats in this order.
+    parsed.top_5_features = mergeUserFeaturesFirst(features, parsed.top_5_features)
+    parsed.proposed_beats = reorderBeatsByUserFeatures(features, parsed.proposed_beats ?? [])
+  }
+  return parsed
+}
+
+/**
+ * Splits the user's "Key features to show" text into individual features
+ * (comma / newline / "and" separated) and prepends them to `inferred`,
+ * dropping inferred entries that duplicate a user-stated one. Capped at 5.
+ */
+function mergeUserFeaturesFirst(userFeaturesRaw: string, inferred: string[]): string[] {
+  const userFeatures = userFeaturesRaw
+    .split(/[\n,;]|\band\b/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s.length < 80)
+  if (userFeatures.length === 0) return inferred
+  const seen = new Set(userFeatures.map((f) => f.toLowerCase()))
+  const remaining = inferred.filter((f) => {
+    const k = f.toLowerCase()
+    for (const u of seen) {
+      if (k.includes(u) || u.includes(k)) return false
+    }
+    return true
+  })
+  return [...userFeatures, ...remaining].slice(0, 5)
+}
+
+/**
+ * Reorders proposed beats so beats whose outcomeDescription / inputHint
+ * mention a user-stated feature come first, in the user's order. Beats that
+ * don't match any user feature trail at the end (kept for coverage).
+ */
+function reorderBeatsByUserFeatures(userFeaturesRaw: string, beats: DemoBeat[]): DemoBeat[] {
+  const userFeatures = userFeaturesRaw
+    .split(/[\n,;]|\band\b/i)
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 2)
+  if (userFeatures.length === 0 || beats.length === 0) return beats
+  const score = (b: DemoBeat): number => {
+    const hay = `${b.outcomeDescription} ${b.inputHint ?? ''}`.toLowerCase()
+    for (let i = 0; i < userFeatures.length; i++) {
+      if (hay.includes(userFeatures[i])) return i
+    }
+    return userFeatures.length + 1
+  }
+  return [...beats].sort((a, b) => score(a) - score(b))
 }
 
 export async function generateScript(
@@ -617,6 +751,11 @@ export async function generateScript(
   tone: VideoTone,
   videoLength: VideoLength
 ): Promise<VideoScript> {
+  const userPriorityScriptBlock = understanding.user_features || understanding.user_description
+    ? `\n\n━━━ FOUNDER'S OWN WORDS (highest priority) ━━━
+${understanding.user_description ? `What the product does: "${understanding.user_description}"\n` : ''}${understanding.user_features ? `Features the founder wants showcased (in order): "${understanding.user_features}"\n` : ''}Your script MUST emphasise these claims and features verbatim where natural. The middle segments must each highlight one of the founder's stated features, in their order, before any inferred feature.`
+    : ''
+
   const prompt = `Write a ${videoLength}-second silent-friendly launch video script for the following product, following the Product Hunt narrative arc (HOOK → PROBLEM → PRODUCT IN ACTION → PROOF → CTA).
 
 PRODUCT NAME: ${understanding.product_name}
@@ -626,7 +765,7 @@ TARGET AUDIENCE: ${understanding.target_audience}
 KEY FEATURES: ${understanding.top_5_features.join(', ')}
 PROBLEM SOLVED: ${understanding.problem_being_solved}
 PRODUCT CATEGORY: ${understanding.product_category}
-TONE: ${tone}
+TONE: ${tone}${userPriorityScriptBlock}
 
 DEMO FLOW (your script MUST produce exactly ${understanding.demo_flow.length} segments, one per step, in this order):
 ${JSON.stringify(understanding.demo_flow.map(s => ({
@@ -659,6 +798,293 @@ REQUIREMENTS:
     logger.warn('generateScript: parse failed, building from demo_flow narrations', { error: err })
     return repairScript({}, understanding, videoLength)
   }
+}
+
+/**
+ * Plans the next 1-3 steps inside the active beat.
+ *
+ * Replaces the older "generate 3-6 actions" framing with the four-role beat
+ * contract: every step declares whether it's `open` (navigate/scroll into the
+ * feature), `setup` (fill / configure inputs), `commit` (the action that
+ * causes a state change — Enter / Submit / Send), or `reveal` (waiting on
+ * the result, captured by the runtime).
+ *
+ * Hard rules baked into the prompt:
+ *   • At MOST one commit per call. The runtime auto-commits typed inputs;
+ *     the planner must NOT plan a follow-up "click Submit" after a type.
+ *   • All `element_to_click` strings must come from the (already-filtered)
+ *     inventory. Forbidden destinations have been removed upstream.
+ *   • For search/form_submit/chat_send beats, the plan MUST contain a
+ *     commit step (a `type` whose runtime auto-commit will fire, OR an
+ *     explicit click whose target is a Submit/Send/Search button).
+ */
+export async function planBeatSteps(
+  beat: DemoBeat,
+  screenshotBase64: string,
+  pageUrl: string,
+  productName: string,
+  understanding: ProductUnderstanding,
+  inventory: DomInventory | undefined,
+  rejectionHint?: string,
+): Promise<DemoStep[]> {
+  const inventoryBlock = inventory && inventory.items.length > 0
+    ? `\n\nLIVE DOM INVENTORY (already filtered — every element listed is allowed; forbidden destinations removed):
+- Counts: ${inventory.buttonCount} buttons, ${inventory.linkCount} links, ${inventory.inputCount} inputs, ${inventory.searchCount} search fields.
+${inventory.primaryCta ? `- Primary CTA visible: "${inventory.primaryCta.text}" (${inventory.primaryCta.kind}).\n` : ''}- Available elements (use these EXACT strings for element_to_click):
+${inventory.items.map((it) => {
+        const dest = it.resolvedHref ? ` (→ ${(() => { try { return new URL(it.resolvedHref).pathname || '/' } catch { return it.resolvedHref } })()})` : ''
+        return `  • ${it.kind}: "${it.text}"${dest}`
+      }).join('\n')}`
+    : `\n\nNo DOM inventory available — read the screenshot carefully and only pick interactions you can SEE.`
+  const inputHintBlock = beat.inputHint
+    ? `\n\nSUGGESTED INPUT VALUE (use this verbatim if a type step makes sense): "${beat.inputHint}"`
+    : ''
+  const rejectBlock = rejectionHint ? `\n\n⚠ FEEDBACK FROM PREVIOUS ATTEMPT: ${rejectionHint}\nFix the plan to address this exactly.` : ''
+
+  const goalRules: Record<BeatGoal, string> = {
+    search: 'You MUST plan a `type` step (the runtime auto-commits with Enter, do NOT plan a follow-up click). Mark it beatStepRole: "commit".',
+    form_submit: 'Plan setup `type` steps for the visible form fields (mark setup), then ONE commit step — either a final `type` (auto-commit) or a `click` on the Submit button (mark commit).',
+    chat_send: 'Plan a `type` into the chat input (mark commit). Runtime auto-commits with Enter.',
+    configure_and_run: 'Plan up to 2 setup `click`/`type` steps (mark setup) followed by ONE commit `click` on the run/generate button (mark commit).',
+    open_feature: 'Plan an `open` step (click into the feature card or scroll to its section). No commit required for this beat.',
+    navigate_explore: 'Plan a single `click` on a visible link to the next exploratory page (mark open). No commit required.',
+  }
+
+  const userPriorityBlock = understanding.user_features
+    ? `\n\n⚠️ USER PRIORITY (from "Key features to show"): ${understanding.user_features}\nThis beat should demonstrate one of these features. Pick the inventory element that best advances those features.`
+    : understanding.user_description
+      ? `\n\nUSER'S PRODUCT DESCRIPTION: ${understanding.user_description}\nGround the narration in what the user said the product does.`
+      : ''
+
+  const prompt = `You are directing a single beat of a SaaS startup demo video. A beat is one complete demonstration: open the feature → set it up → commit → let the result render.
+
+PRODUCT: ${productName}
+CURRENT URL: ${pageUrl}
+KEY FEATURES: ${understanding.top_5_features.slice(0, 5).join(', ')}${userPriorityBlock}
+
+━━━ CURRENT BEAT GOAL ━━━
+Goal: ${beat.goal}
+Outcome we want to show: ${beat.outcomeDescription}
+${goalRules[beat.goal]}${inputHintBlock}${inventoryBlock}${rejectBlock}
+
+CRITICAL RULES:
+1. Plan AT MOST 3 steps. Every step must have a "beatStepRole" ∈ ["open", "setup", "commit", "reveal"]. Most calls should return 1-2 steps; the runtime captures the reveal automatically.
+2. AT MOST ONE step in the plan may have beatStepRole "commit". Do NOT plan past the commit — the runtime auto-commits typed inputs and dwells on the result.
+3. For "type" steps: the runtime presses Enter (or clicks the form's Submit) automatically. Do NOT add a separate "click Submit" / "click Search" step after a type. Mark the type step as "commit" when it's the action that causes the result to render.
+4. Allowed actions: "click", "type", "scroll_down", "scroll_up", "hover". NEVER "navigate" — the recorder navigates between beats, not within them.
+5. Every element_to_click MUST be EXACT visible text from the LIVE DOM INVENTORY above. No invention, no paraphrasing.
+6. Skip login/signup/register/auth/password elements entirely.
+7. Each narration: 1 vivid sentence, 6-12 words. Describe the OUTCOME the viewer will see, not the mechanics.
+
+Return ONLY valid JSON (no markdown):
+{"steps": [
+  {"step": 1, "action": "type", "description": "Type a realistic value into the visible input", "narration": "Searching inside ${productName} is **instant**.", "element_to_click": "<exact input label/placeholder from the inventory>", "type_text": "<realistic value matching the product domain>", "beatStepRole": "commit"}
+]}`
+
+  const visionModels = VISION_MODEL_CHAIN
+
+  for (const visionModel of visionModels) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt === 0) {
+          logger.info(`gemini: planBeatSteps[${beat.id}/${beat.goal}] via ${visionModel} for ${pageUrl}`)
+        }
+        const text = await withTimeout(
+          callGeminiVision(visionModel, prompt, screenshotBase64),
+          25_000,
+          `gemini:planBeatSteps:${visionModel}`,
+        )
+        const jsonText = extractJson(text)
+        const raw = JSON.parse(jsonText.replace(/\\n/g, ' ')) as Record<string, unknown>
+        const stepsArray = Array.isArray(raw.steps) ? raw.steps : (Array.isArray(raw) ? raw : [])
+
+        if (stepsArray.length === 0) {
+          logger.info(`planBeatSteps: ${visionModel} returned empty steps`)
+          break
+        }
+
+        const steps = (stepsArray as unknown[])
+          .map((s: unknown, i: number) => repairDemoStep(s, i, pageUrl))
+          .filter((s) => s.action !== 'navigate')
+          .slice(0, 3)
+        // Annotate any missing beatStepRole based on action — best-effort
+        // so downstream validation has something to work with even when the
+        // model forgot the role on a step.
+        for (const s of steps) {
+          if (s.beatStepRole) continue
+          if (s.action === 'type') s.beatStepRole = 'commit'
+          else if (s.action === 'click') s.beatStepRole = 'open'
+          else s.beatStepRole = 'open'
+        }
+        logger.info(`gemini: planBeatSteps[${beat.id}]: ${steps.length} steps`)
+        return steps
+      } catch (err) {
+        if (isQuotaExhausted(err)) {
+          logger.info(`planBeatSteps: ${visionModel} quota exhausted, trying next model`)
+          break
+        }
+        if (isTransientUnavailable(err) && attempt < 2) {
+          const waitMs = 4000 + attempt * 8000
+          logger.info(`planBeatSteps: ${visionModel} overloaded — waiting ${Math.round(waitMs / 1000)}s`)
+          await new Promise((resolve) => setTimeout(resolve, waitMs))
+          continue
+        }
+        logger.info(`planBeatSteps: ${visionModel} failed (${shortErr(err)})`)
+        break
+      }
+    }
+  }
+
+  logger.info('planBeatSteps: all vision models unavailable — using inventory-driven fallback')
+  return beatFallbackSteps(beat, inventory, productName)
+}
+
+/**
+ * Adaptive beat synthesis. When the seed beat queue is empty AND the recorder
+ * has navigated to a fresh URL, this function inspects the live DOM inventory
+ * and proposes ONE beat keyed to whatever the page actually offers. Returns
+ * `null` when the page has no demo-worthy interactions (recorder ends loop).
+ */
+export async function proposeBeat(
+  pageUrl: string,
+  productName: string,
+  understanding: ProductUnderstanding,
+  inventory: DomInventory | undefined,
+): Promise<DemoBeat | null> {
+  if (!inventory || inventory.items.length === 0) return null
+
+  // When the user named priority features, the input value the recorder
+  // types should reflect what the user said the product does — not a generic
+  // "${productName} workflow" filler. Pull the first user feature for the
+  // search/chat seed text so the demo demonstrates THEIR feature.
+  const userFirstFeature = understanding.user_features
+    ? understanding.user_features.split(/[\n,;]|\band\b/i).map((s) => s.trim()).filter((s) => s.length > 2)[0]
+    : undefined
+
+  const search = inventory.items.find((it) => it.kind === 'search')
+  if (search) {
+    const seed = userFirstFeature ?? `${productName.split(' ')[0].toLowerCase()} workflow`
+    return {
+      id: `beat-adhoc-${Date.now()}`,
+      goal: 'search',
+      outcomeDescription: userFirstFeature
+        ? `${productName} surfaces results matching "${userFirstFeature}"`
+        : `${productName}'s search results render below the input`,
+      targetUrl: pageUrl,
+      inputHint: seed.slice(0, 60),
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    }
+  }
+
+  const textarea = inventory.items.find((it) => it.kind === 'input' && it.inputType === 'textarea')
+  if (textarea) {
+    return {
+      id: `beat-adhoc-${Date.now()}`,
+      goal: 'chat_send',
+      outcomeDescription: userFirstFeature
+        ? `${productName} responds to a request about ${userFirstFeature}`
+        : `${productName} responds to the message below the input`,
+      targetUrl: pageUrl,
+      inputHint: userFirstFeature ?? understanding.top_5_features[0] ?? `Try ${productName}`,
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    }
+  }
+
+  const input = inventory.items.find((it) => it.kind === 'input')
+  if (input) {
+    return {
+      id: `beat-adhoc-${Date.now()}`,
+      goal: 'form_submit',
+      outcomeDescription: `${productName} confirms the submission`,
+      targetUrl: pageUrl,
+      inputHint: input.inputType === 'email' ? 'demo@example.com' : `Try ${productName}`,
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    }
+  }
+
+  if (inventory.primaryCta) {
+    return {
+      id: `beat-adhoc-${Date.now()}`,
+      goal: 'open_feature',
+      outcomeDescription: `${productName}'s ${inventory.primaryCta.text} flow opens`,
+      targetUrl: pageUrl,
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    }
+  }
+
+  return null
+}
+
+/** Inventory-driven fallback step list scoped to the beat's goal. */
+function beatFallbackSteps(
+  beat: DemoBeat,
+  inventory: DomInventory | undefined,
+  productName: string,
+): DemoStep[] {
+  if (!inventory || inventory.items.length === 0) {
+    return [{
+      step: 1,
+      action: 'scroll_down',
+      description: 'Reveal more of the page',
+      narration: `Here's ${productName} in action.`,
+      beatStepRole: 'open',
+    }]
+  }
+  if (beat.goal === 'search' || beat.goal === 'chat_send') {
+    const target = inventory.items.find((it) => it.kind === 'search')
+      ?? inventory.items.find((it) => it.kind === 'input' && it.inputType === 'textarea')
+      ?? inventory.items.find((it) => it.kind === 'input')
+    if (target) {
+      return [{
+        step: 1,
+        action: 'type',
+        description: 'Type a realistic example into the visible field',
+        narration: `Search inside ${productName} is **instant**.`,
+        element_to_click: target.text,
+        type_text: beat.inputHint ?? `Try ${productName}`,
+        beatStepRole: 'commit',
+      }]
+    }
+  }
+  if (beat.goal === 'form_submit') {
+    const input = inventory.items.find((it) => it.kind === 'input')
+    if (input) {
+      return [{
+        step: 1,
+        action: 'type',
+        description: 'Type a realistic value into the field',
+        narration: `${productName} keeps inputs **simple**.`,
+        element_to_click: input.text,
+        type_text: beat.inputHint ?? (input.inputType === 'email' ? 'demo@example.com' : `Try ${productName}`),
+        beatStepRole: 'commit',
+      }]
+    }
+  }
+  if (inventory.primaryCta) {
+    return [{
+      step: 1,
+      action: 'click',
+      description: `Click the primary CTA "${inventory.primaryCta.text}"`,
+      narration: `Getting started with ${productName} is **one click**.`,
+      element_to_click: inventory.primaryCta.text,
+      beatStepRole: 'open',
+    }]
+  }
+  return [{
+    step: 1,
+    action: 'scroll_down',
+    description: 'Reveal more of the page',
+    narration: `Here's more of ${productName}.`,
+    beatStepRole: 'open',
+  }]
 }
 
 /**

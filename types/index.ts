@@ -14,6 +14,27 @@ export type VideoLength = number
 /** Actions available in a demo flow step */
 export type DemoAction = 'scroll_down' | 'scroll_up' | 'click' | 'navigate' | 'wait' | 'hover' | 'type'
 
+/**
+ * The high-level intent of a demo beat. A beat is a 3-5 step sequence
+ * (open → setup → commit → reveal) that demonstrates ONE product capability
+ * end-to-end. The goal informs the planner's prompt and the runtime's
+ * auto-commit heuristic (search → press Enter, form → click submit, etc.).
+ */
+export type BeatGoal =
+  | 'search'
+  | 'form_submit'
+  | 'chat_send'
+  | 'configure_and_run'
+  | 'open_feature'
+  | 'navigate_explore'
+
+/**
+ * A step's role inside its parent beat. The runtime auto-commits after a
+ * step marked 'commit' (unless skipCommit is set) and dwells on the result
+ * during the implicit 'reveal' phase that follows.
+ */
+export type BeatStepRole = 'open' | 'setup' | 'commit' | 'reveal'
+
 /** A single step in the automated demo recording flow */
 export interface DemoStep {
   step: number
@@ -23,6 +44,39 @@ export interface DemoStep {
   element_to_click?: string
   navigate_to?: string
   type_text?: string
+  /** Beat-aware planner annotation; absent for legacy / seed steps. */
+  beatStepRole?: BeatStepRole
+  /** Set true when the planner explicitly does NOT want the runtime to auto-commit (e.g. partial form fields). */
+  skipCommit?: boolean
+}
+
+/**
+ * A beat is the unit of demonstration: open feature → setup → commit → reveal.
+ * The recorder advances through a queue of beats; each beat resolves to either
+ * `achieved` (outcome detected after a commit step) or `abandoned` (no outcome
+ * after `attempts` retries, or unrecoverable navigation).
+ */
+export interface DemoBeat {
+  /** Stable id used to tag scenes belonging to this beat (e.g. "beat-1"). */
+  id: string
+  /** High-level intent — informs the planner prompt and runtime auto-commit heuristic. */
+  goal: BeatGoal
+  /** One-liner describing what the viewer should see after the commit (e.g. "search results for the query are visible"). */
+  outcomeDescription: string
+  /** Page URL the recorder should navigate to before running this beat. */
+  targetUrl?: string
+  /** Realistic value the planner should type (when the beat involves typing). */
+  inputHint?: string
+  /** Steps materialised by `planBeatSteps` once the recorder reaches the target page. Empty until the beat is active. */
+  steps: DemoStep[]
+  /** Lifecycle state. `pending` → `active` → (`achieved` | `abandoned`). */
+  status: 'pending' | 'active' | 'achieved' | 'abandoned'
+  /** Number of plan-and-run attempts spent on this beat. Capped at 2. */
+  attempts: number
+  /** Path to a screenshot taken at the beat's `open` step. */
+  startScreenshotPath?: string
+  /** Path to a screenshot taken at the moment the outcome was detected. */
+  outcomeScreenshotPath?: string
 }
 
 /** Bounding box of a target element on page */
@@ -72,6 +126,14 @@ export interface SceneCapture {
   screenshotPath?: string
   /** Cheap perceptual-hash signature of the post-action screenshot. Used to detect frozen/looping content. */
   noveltyHash?: string
+  /** Id of the beat this scene belongs to. Absent for legacy / seed scenes. */
+  beatId?: string
+  /** Role within the beat — assembler weighs `commit` + `reveal` clips longer. */
+  beatStepRole?: BeatStepRole
+  /** How the runtime confirmed the beat outcome (or that it gave up). */
+  outcomeKind?: 'url' | 'dom' | 'network' | 'timeout' | 'none'
+  /** Path to the post-commit reveal screenshot — preferred over the typing-finish frame for caption regen. */
+  outcomeScreenshotPath?: string
 }
 
 /** Manifest output from the browser recorder */
@@ -87,6 +149,12 @@ export interface RecordingManifest {
    * it's leading recording garbage that the assembler/Remotion ignore.
    */
   prerollMs?: number
+  /**
+   * Beats the runtime ran (achieved + abandoned). Empty array for legacy
+   * recordings predating beat-driven planning. Verification asserts at
+   * least 2 entries with `status === 'achieved'`.
+   */
+  beats?: DemoBeat[]
 }
 
 /**
@@ -107,6 +175,13 @@ export interface DomInventoryItem {
   primaryCta?: boolean
   /** Semantic role of the input — informs realistic sample-text generation. */
   inputType?: 'text' | 'search' | 'email' | 'password' | 'textarea' | 'tel' | 'url' | 'number'
+  /**
+   * Resolved absolute destination URL when the item navigates somewhere.
+   * Anchors → `el.href`. Buttons → best-effort from `data-href`, `formaction`,
+   * or a literal URL inside `onclick`. Used to filter forbidden-revisit
+   * destinations BEFORE the planner sees the inventory.
+   */
+  resolvedHref?: string
 }
 
 /** Aggregated counts + shortlist returned by `scanDomInventory`. */
@@ -147,6 +222,24 @@ export interface ProductUnderstanding {
   problem_being_solved: string
   key_pages_to_visit: string[]
   demo_flow: DemoStep[]
+  /**
+   * 2-3 seed beats synthesised from `top_5_features` + `key_pages_to_visit`.
+   * The recorder seeds its `BeatRunner` queue from this list; if empty, the
+   * runner falls back to adaptive `proposeBeat` calls.
+   */
+  proposed_beats?: DemoBeat[]
+  /**
+   * Verbatim text the user typed into "What does your product do?" — stamped
+   * server-side after the model returns so it can't be overridden by
+   * hallucination. Downstream beat planning treats this as ground truth.
+   */
+  user_description?: string
+  /**
+   * Verbatim text the user typed into "Key features to show" — same stamping
+   * rule. The recorder prioritises beats that demonstrate THESE features over
+   * the model's inferred top_5_features.
+   */
+  user_features?: string
 }
 
 /** A single narration segment in the video script */
