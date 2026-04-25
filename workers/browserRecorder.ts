@@ -6,6 +6,8 @@ import { chromium, type Page } from 'playwright'
 import { logger } from '../lib/logger'
 import { getFfmpegPath } from '../lib/ffmpegUtils'
 import { identifyElementOnPage, planPageInteractions } from '../lib/gemini'
+import { scanDomInventory, sampleTypeText } from '../lib/domInventory'
+import { perceptualHash, hashSimilarity } from '../lib/utils'
 import type {
   ProductUnderstanding,
   DemoStep,
@@ -13,6 +15,7 @@ import type {
   RecordingManifest,
   ElementBox,
   VideoLength,
+  DomInventory,
 } from '../types'
 
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'teaser-recordings')
@@ -112,8 +115,30 @@ const CURSOR_SCRIPT = `
           0 6px 22px rgba(0,0,0,0.35);
         animation: teaser-ripple 620ms cubic-bezier(0.22, 0.8, 0.3, 1) forwards;
       }
+      /* Loading shim — covers the page in dark while it's still loading.
+         Removed once the recorder writes data-teaser-ready="1" on <body>. */
+      #teaser-loading-shim {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483645;
+        background: #0A0A0A;
+        pointer-events: none;
+        opacity: 1;
+        transition: opacity 380ms ease-out;
+      }
+      body[data-teaser-ready="1"] #teaser-loading-shim { opacity: 0; pointer-events: none; }
     \`;
     document.documentElement.appendChild(style);
+
+    // Inject the loading shim as soon as <body> exists.
+    const installShim = () => {
+      if (!document.body || document.getElementById('teaser-loading-shim')) return;
+      const shim = document.createElement('div');
+      shim.id = 'teaser-loading-shim';
+      document.body.appendChild(shim);
+    };
+    if (document.body) installShim();
+    else document.addEventListener('DOMContentLoaded', installShim, { once: true });
 
     const CURSOR_SIZE = 40;
     const cursor = document.createElement('div');
@@ -249,6 +274,89 @@ async function easedMoveTo(page: Page, tx: number, ty: number): Promise<void> {
  */
 async function postActionWait(page: Page, maxMs = 2500): Promise<void> {
   await page.waitForLoadState('networkidle', { timeout: maxMs }).catch(() => {})
+}
+
+/**
+ * Hard page-settle for navigations — waits for networkidle, fonts to finish
+ * loading, and then a fixed paint settle so animations + first contentful
+ * paint complete before any clip window opens. Returns the wall-clock ms
+ * spent waiting so callers can subtract it from clip durations if needed.
+ */
+async function pageSettle(page: Page, opts: { networkIdleMs?: number; settleMs?: number } = {}): Promise<number> {
+  const { networkIdleMs = 4000, settleMs = 800 } = opts
+  const start = Date.now()
+  await page.waitForLoadState('networkidle', { timeout: networkIdleMs }).catch(() => {})
+  await page
+    .evaluate(() => {
+      const fonts = (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts
+      return fonts && fonts.ready ? fonts.ready : null
+    })
+    .catch(() => {})
+  await page.waitForTimeout(settleMs)
+  return Date.now() - start
+}
+
+/**
+ * Marks the page as ready so the dark loading shim fades out. Called once,
+ * after the initial entry settle completes, and after every navigate-step
+ * settle. Idempotent — safe to call repeatedly.
+ */
+async function markPageReady(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      if (document.body) document.body.dataset.teaserReady = '1'
+    })
+    .catch(() => {})
+}
+
+/**
+ * Marks the page as NOT ready immediately before a navigation that will
+ * reload content. The dark shim re-installs itself on the next page via
+ * the init script, so the loading transition appears as a brief dark fade
+ * instead of a white flash in the recording.
+ */
+async function markPageLoading(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      if (document.body) document.body.removeAttribute('data-teaser-ready')
+    })
+    .catch(() => {})
+}
+
+/**
+ * Animates the cursor into frame from off-screen toward a point ~120 px
+ * from the target. Reads as "I'm about to do something on purpose" — the
+ * core visual signal of intentional interaction in product launch videos.
+ * Skipped if the cursor is already near the target.
+ */
+async function cursorEntrance(page: Page, targetX: number, targetY: number): Promise<void> {
+  const state = await page
+    .evaluate(() => ({
+      x: (window as unknown as { __lastMouseX?: number }).__lastMouseX ?? -1,
+      y: (window as unknown as { __lastMouseY?: number }).__lastMouseY ?? -1,
+    }))
+    .catch(() => ({ x: -1, y: -1 }))
+  const dist = state.x < 0 ? Infinity : Math.hypot(targetX - state.x, targetY - state.y)
+  if (dist < 200) return // already nearby — skip the entrance, just ease in
+
+  // Pick the nearest edge as the entry point.
+  const fromLeft = targetX < VIDEO_WIDTH / 2
+  const entryX = fromLeft ? -40 : VIDEO_WIDTH + 40
+  const entryY = Math.max(80, Math.min(VIDEO_HEIGHT - 80, targetY + (Math.random() < 0.5 ? -90 : 90)))
+  await page
+    .evaluate((pos: { x: number; y: number }) => {
+      ;(window as unknown as { __lastMouseX?: number; __lastMouseY?: number }).__lastMouseX = pos.x
+      ;(window as unknown as { __lastMouseX?: number; __lastMouseY?: number }).__lastMouseY = pos.y
+    }, { x: entryX, y: entryY })
+    .catch(() => {})
+  await page.mouse.move(entryX, entryY)
+
+  // Approach: animate to a point ~140 px from target, briefly pause, then
+  // the regular easedMoveTo handles the final settle in the caller.
+  const approachX = targetX + (fromLeft ? -140 : 140)
+  const approachY = targetY + (Math.random() < 0.5 ? -40 : 40)
+  await easedMoveTo(page, approachX, approachY)
+  await page.waitForTimeout(120)
 }
 
 /**
@@ -439,6 +547,16 @@ interface StepContext {
   understanding: ProductUnderstanding
   allowedPaths: Set<string> | null
   productOrigin: string
+  /** Wall-clock ms reserved at the start of the recording for entry-page settle.
+   *  No clip starts before this time; ensures the leading loading frames are
+   *  not part of any clip window. */
+  prerollMs: number
+  /** Output directory — the recorder writes per-scene reference screenshots here
+   *  for the post-recording vision narration pass. */
+  outputDir: string
+  /** URL of the initial entry page. We refuse to navigate back to this after
+   *  the seed steps complete, which kills the homepage-loop-back symptom. */
+  entryUrl: string
 }
 
 /** Normalises a URL to `host+pathname` for siteMap membership checks. */
@@ -504,43 +622,145 @@ async function fallbackVisualMotion(page: Page, stepIndex: number): Promise<void
   })
 }
 
-async function planLiveSteps(ctx: StepContext, allowNavigation: boolean): Promise<DemoStep[]> {
+/**
+ * Returns true if every step in `steps` is a scroll action — used to detect
+ * scroll-only batches that ignore the live interactivity available on the page.
+ */
+function isScrollOnlyBatch(steps: DemoStep[]): boolean {
+  if (steps.length === 0) return true
+  return steps.every((s) => s.action === 'scroll_down' || s.action === 'scroll_up')
+}
+
+/**
+ * Adds a deterministic interaction to a scroll-only batch when the live DOM
+ * has real interactive elements available. We pick the highest-value option
+ * (search > primary CTA > input > button) and synthesize a step before any
+ * scrolls so the viewer sees real interaction first.
+ */
+function injectInventoryInteraction(
+  steps: DemoStep[],
+  inventory: DomInventory,
+  productName: string,
+): DemoStep[] {
+  const search = inventory.items.find((it) => it.kind === 'search')
+  if (search) {
+    return [
+      {
+        step: 0,
+        action: 'type',
+        description: 'Type a realistic query into the search field',
+        narration: `Search inside ${productName} is **instant**.`,
+        element_to_click: search.text,
+        type_text: sampleTypeText(search.inputType, productName),
+      },
+      ...steps,
+    ]
+  }
+  if (inventory.primaryCta) {
+    return [
+      {
+        step: 0,
+        action: 'click',
+        description: `Click the primary CTA "${inventory.primaryCta.text}"`,
+        narration: `Getting started with ${productName} is **one click**.`,
+        element_to_click: inventory.primaryCta.text,
+      },
+      ...steps,
+    ]
+  }
+  const input = inventory.items.find((it) => it.kind === 'input')
+  if (input) {
+    return [
+      {
+        step: 0,
+        action: 'type',
+        description: 'Type a realistic value into the visible input',
+        narration: `${productName} keeps inputs **simple**.`,
+        element_to_click: input.text,
+        type_text: sampleTypeText(input.inputType, productName),
+      },
+      ...steps,
+    ]
+  }
+  const button = inventory.items.find((it) => it.kind === 'button')
+  if (button) {
+    return [
+      {
+        step: 0,
+        action: 'click',
+        description: `Click the "${button.text}" button`,
+        narration: `Inside ${productName} actions are **direct**.`,
+        element_to_click: button.text,
+      },
+      ...steps,
+    ]
+  }
+  return steps
+}
+
+async function planLiveSteps(
+  ctx: StepContext,
+  allowNavigation: boolean,
+  inventory: DomInventory,
+): Promise<DemoStep[]> {
   try {
     await dismissPopups(ctx.page)
     const screenshot = await ctx.page.screenshot({ type: 'jpeg', quality: 70 })
-    const steps = await planPageInteractions(
+    let steps = await planPageInteractions(
       screenshot.toString('base64'),
       ctx.page.url(),
       ctx.understanding.product_name,
       ctx.understanding,
       ctx.visitedUrls,
       allowNavigation,
+      inventory,
     )
-    // Allow click-based navigation (Gemini returns clicks on nav links).
-    // Only strip hard "navigate" actions which use guessed URLs.
+
+    const hasInteractives = inventory.buttonCount + inventory.inputCount + inventory.searchCount > 0
+    // If the page has real interactives but Gemini returned scroll-only,
+    // reject and re-plan once with an explicit feedback hint.
+    if (hasInteractives && isScrollOnlyBatch(steps)) {
+      logger.info('recorder: scroll-only batch rejected — re-planning with inventory feedback')
+      try {
+        const retrySteps = await planPageInteractions(
+          screenshot.toString('base64'),
+          ctx.page.url(),
+          ctx.understanding.product_name,
+          ctx.understanding,
+          ctx.visitedUrls,
+          allowNavigation,
+          inventory,
+          `Your previous plan only contained scrolls. The page has ${inventory.buttonCount + inventory.linkCount} buttons/links and ${inventory.inputCount + inventory.searchCount} input/search fields. Pick a click or type instead.`,
+        )
+        if (!isScrollOnlyBatch(retrySteps)) {
+          steps = retrySteps
+        }
+      } catch (err) {
+        logger.warn('recorder: re-plan attempt failed', { err })
+      }
+    }
+
+    // If the planner is still scroll-only despite available interactives,
+    // synthesize a deterministic interaction step from the inventory.
+    if (hasInteractives && isScrollOnlyBatch(steps)) {
+      logger.info('recorder: still scroll-only — injecting deterministic interaction from inventory')
+      steps = injectInventoryInteraction(steps, inventory, ctx.understanding.product_name)
+    }
+
     return steps
       .filter((step) => step.action !== 'navigate')
       .slice(0, 6)
   } catch (err) {
-    logger.warn('recorder: live page planning failed, falling back to scroll sequence', { err })
+    logger.warn('recorder: live page planning failed, falling back to inventory-driven scroll', { err })
+    if (inventory.items.length > 0) {
+      return injectInventoryInteraction([], inventory, ctx.understanding.product_name)
+    }
     return [
       {
         step: 1,
         action: 'scroll_down',
         description: 'Explore more of the current page',
         narration: `Here is ${ctx.understanding.product_name} in more detail.`,
-      },
-      {
-        step: 2,
-        action: 'scroll_down',
-        description: 'Continue through the product story',
-        narration: 'The product keeps the important details easy to scan.',
-      },
-      {
-        step: 3,
-        action: 'scroll_up',
-        description: 'Return to the key call to action',
-        narration: 'Everything leads back to a clear next step.',
       },
     ]
   }
@@ -613,9 +833,18 @@ async function captureStep(
           }
         }
 
+        // Mark the page as "loading" so the dark shim covers any white flash
+        // before the next page hydrates. The shim auto-fades when we mark
+        // ready post-settle.
+        await markPageLoading(page)
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 }).catch(() => {})
         await dismissPopups(page)
-        await postActionWait(page)
+        await pageSettle(page, { networkIdleMs: 4000, settleMs: 800 })
+        await markPageReady(page)
+        // Reset clipStart to AFTER the page has settled. The white loading
+        // transition was captured into the MP4 but no clip references it,
+        // which keeps mid-video white flashes out of the final cut.
+        clipStart = t()
         break
       }
 
@@ -631,15 +860,19 @@ async function captureStep(
                 width: Math.round(box.width),
                 height: Math.round(box.height),
               }
-              // Arc toward the target → hover-signal 280 ms → click.
-              // The hover dwell lets CSS `:hover` states render before
-              // the press, which is the hallmark "planned" feel of good
-              // product demos.
+              // Cursor entrance from off-screen → ease to target → 280 ms hover
+              // dwell so CSS :hover states paint → click. This is the
+              // intentional-interaction signal that reads as a real demo.
+              await cursorEntrance(page, targetElement.x, targetElement.y)
               await easedMoveTo(page, targetElement.x, targetElement.y)
               await page.waitForTimeout(280)
             }
+            // If the click triggers a navigation, hide the white flash with
+            // the shim. markPageReady runs after settle in the post-action wait.
+            await markPageLoading(page)
             await locator.click({ timeout: 3000, delay: 60 })
-            await postActionWait(page)
+            await pageSettle(page, { networkIdleMs: 3000, settleMs: 600 })
+            await markPageReady(page)
           } catch (clickErr) {
             logger.warn(`recorder step ${stepIndex}: click failed`, { err: clickErr })
             elementNotFound = true
@@ -653,11 +886,14 @@ async function captureStep(
               clipStart = t()
               if (fallback.elementBox) {
                 targetElement = fallback.elementBox
+                await cursorEntrance(page, targetElement.x, targetElement.y)
                 await easedMoveTo(page, targetElement.x, targetElement.y)
                 await page.waitForTimeout(280)
               }
+              await markPageLoading(page)
               await fallback.locator.click({ timeout: 3000, delay: 60 })
-              await postActionWait(page)
+              await pageSettle(page, { networkIdleMs: 3000, settleMs: 600 })
+              await markPageReady(page)
             } catch {
               elementNotFound = true
             }
@@ -682,11 +918,12 @@ async function captureStep(
                 width: Math.round(box.width),
                 height: Math.round(box.height),
               }
+              await cursorEntrance(page, targetElement.x, targetElement.y)
               await easedMoveTo(page, targetElement.x, targetElement.y)
               await page.waitForTimeout(220)
             }
             await locator.click({ timeout: 3000 })
-            await typeWithJitter(page, step.type_text ?? 'hello')
+            await typeWithJitter(page, step.type_text ?? `Try ${ctx.understanding.product_name}`)
             await page.waitForTimeout(650)
           } catch {
             elementNotFound = true
@@ -753,6 +990,21 @@ async function captureStep(
     await page.waitForTimeout(remainingMs)
   }
 
+  // Capture a reference screenshot mid-scene so the post-recording vision
+  // narration pass can describe what is actually on screen for this scene.
+  // Failure here is non-fatal — the scene still records, just without a
+  // reference frame for narration regen.
+  let screenshotPath: string | undefined
+  let noveltyHash: string | undefined
+  try {
+    const buf = await page.screenshot({ type: 'jpeg', quality: 70 })
+    screenshotPath = path.join(ctx.outputDir, `scene-${String(stepIndex).padStart(3, '0')}.jpg`)
+    fs.writeFileSync(screenshotPath, buf)
+    noveltyHash = perceptualHash(buf)
+  } catch (err) {
+    logger.warn(`recorder step ${stepIndex}: reference screenshot failed`, { err })
+  }
+
   const sceneEnd = t()
   return {
     step: stepIndex,
@@ -764,6 +1016,8 @@ async function captureStep(
     typeText: step.type_text ?? null,
     elementNotFound,
     pageUrl: page.url(),
+    screenshotPath,
+    noveltyHash,
   }
 }
 
@@ -863,9 +1117,14 @@ export async function recordProduct(
         await page.goto(entryUrl, { waitUntil: 'commit', timeout: 15_000 }).catch(() => {})
       })
     await dismissPopups(page)
-    // Let the page paint once before we start interacting. 1.2 s is enough for
-    // first-contentful-paint on any site that loaded via domcontentloaded.
-    await page.waitForTimeout(1200)
+    // Hard settle gate — wait for networkidle, fonts, and animations to finish
+    // before any clip windows open. The dark loading shim covers the recording
+    // until this point so the leading frames of recording.mp4 are visually
+    // clean even though the file's first ~5s are unused preroll.
+    await pageSettle(page, { networkIdleMs: 8000, settleMs: 1500 })
+    await markPageReady(page)
+    const prerollMs = Date.now() - recordingStartTime
+    logger.info(`recorder: entry-page settle complete after ${prerollMs}ms total`)
 
     // Expand the allow-list with links from the live DOM right after landing.
     // This catches SPA routes that Firecrawl/sitemap never found.
@@ -883,22 +1142,25 @@ export async function recordProduct(
       understanding,
       allowedPaths,
       productOrigin,
+      prerollMs,
+      outputDir,
+      entryUrl,
     }
 
     // ── Execute seed steps, then extend with live screenshot-grounded plans ───
     let stepCounter = 0
-    const lastNarrations: string[] = [] // track recent narrations to prevent looping
+    /** URLs we refuse to revisit during the live phase — prevents homepage loop-back. */
+    const forbiddenRevisits = new Set<string>()
+    /** Recent novelty hashes — used to detect stuck/looping content. */
+    const recentHashes: string[] = []
 
-    /** Pushes a scene and deduplicates narration against recent history. */
+    /** Pushes a scene to the manifest. */
     function pushScene(scene: SceneCapture): void {
-      // Prevent caption looping: if this narration matches any of the last 3, tweak it
-      const cleanNarration = (scene.narration ?? '').replace(/\s+/g, ' ').trim()
-      if (cleanNarration && lastNarrations.includes(cleanNarration)) {
-        scene.narration = `${understanding.product_name} continues the product story.`
-      }
-      lastNarrations.push((scene.narration ?? '').replace(/\s+/g, ' ').trim())
-      if (lastNarrations.length > 4) lastNarrations.shift()
       scenes.push(scene)
+      if (scene.noveltyHash) {
+        recentHashes.push(scene.noveltyHash)
+        if (recentHashes.length > 4) recentHashes.shift()
+      }
     }
 
     for (let i = 0; i < demoSteps.length; i++) {
@@ -910,10 +1172,19 @@ export async function recordProduct(
       await handlePageAfterScene(ctx)
     }
 
+    // After seed steps complete, lock the entry URL key — never navigate back
+    // to the homepage during the live phase. This is the single biggest fix
+    // for the "video loops back to landing page and replays" symptom.
+    const entryKey = urlKey(entryUrl)
+    if (entryKey) forbiddenRevisits.add(entryKey)
+
     let liveBatch = 0
     let batchesOnCurrentPage = 0
     let lastPageUrl = page.url()
     let scrollOnlyBatches = 0
+    /** Live-batch hard cap — tighter than before because each batch contains
+     *  real interactions (click/type) rather than pure scrolls. */
+    const MAX_LIVE_BATCHES = 12
 
     while (capturedClipDurationMs(scenes) < targetDemoMs) {
       const wallClockMs = Date.now() - recordingStartTime
@@ -923,9 +1194,24 @@ export async function recordProduct(
         )
         break
       }
-      if (liveBatch >= 50) {
-        logger.warn('recorder: hit live planning batch cap')
+      if (liveBatch >= MAX_LIVE_BATCHES) {
+        logger.info('recorder: hit live planning batch cap — ending cleanly')
         break
+      }
+
+      // Novelty check: if the last 3 scene hashes are highly similar, we're
+      // looping or stuck on a frozen frame. Break cleanly rather than padding
+      // duration with more scrolls.
+      if (recentHashes.length >= 3) {
+        const last = recentHashes[recentHashes.length - 1]
+        const prev1 = recentHashes[recentHashes.length - 2]
+        const prev2 = recentHashes[recentHashes.length - 3]
+        const sim1 = hashSimilarity(last, prev1)
+        const sim2 = hashSimilarity(last, prev2)
+        if (sim1 > 0.85 && sim2 > 0.85) {
+          logger.info('recorder: 3 consecutive near-identical scenes — terminating to avoid loop')
+          break
+        }
       }
 
       // Track whether we're stuck on the same page
@@ -939,21 +1225,29 @@ export async function recordProduct(
       }
 
       const remainingMs = targetDemoMs - capturedClipDurationMs(scenes)
-      // Allow navigation when: enough time remaining, haven't visited too many pages,
-      // OR we've been stuck on the same page for 3+ batches
       const allowNavigation = (remainingMs > 15_000 && visitedUrls.length < 8) ||
         batchesOnCurrentPage >= 3
       liveBatch++
+
+      // Scan the live DOM for interactives BEFORE planning. The vision agent
+      // uses this both to bias its action selection toward what's actually
+      // available and to feed deterministic fallbacks if Gemini fails.
+      const inventory = await scanDomInventory(page)
       logger.info(
-        `recorder: live plan ${liveBatch} (${Math.round(remainingMs / 1000)}s clips remaining, ` +
-        `navigation ${allowNavigation ? 'on' : 'off'}, batches on page: ${batchesOnCurrentPage})`,
+        `recorder: live plan ${liveBatch}/${MAX_LIVE_BATCHES} (${Math.round(remainingMs / 1000)}s clips remaining, ` +
+        `nav ${allowNavigation ? 'on' : 'off'}, batches on page: ${batchesOnCurrentPage}, ` +
+        `inventory: ${inventory.buttonCount}b/${inventory.linkCount}l/${inventory.inputCount}i/${inventory.searchCount}s)`,
       )
 
-      // If stuck on same page with only scrolls for 2+ batches, force-navigate to next unvisited page
+      // Force-navigate to an unvisited page after 2 scroll-only batches —
+      // unless every reachable URL is already exhausted, in which case
+      // terminate rather than loop.
       if (scrollOnlyBatches >= 2 && siteMap.length > 0) {
         const unvisited = siteMap.find((u) => {
           const key = urlKey(u)
-          return key && !visitedUrls.some((v) => urlKey(v) === key)
+          if (!key) return false
+          if (forbiddenRevisits.has(key)) return false
+          return !visitedUrls.some((v) => urlKey(v) === key)
         })
         if (unvisited) {
           logger.info(`recorder: force-navigating to unvisited page: ${unvisited}`)
@@ -961,7 +1255,7 @@ export async function recordProduct(
             step: stepCounter + 1,
             action: 'navigate',
             description: `Navigate to ${new URL(unvisited).pathname}`,
-            narration: `Let's explore another part of ${understanding.product_name}.`,
+            narration: `Now let's see another part of ${understanding.product_name}.`,
             navigate_to: unvisited,
           }
           const scene = await captureStep(ctx, navStep, ++stepCounter)
@@ -972,15 +1266,19 @@ export async function recordProduct(
           lastPageUrl = page.url()
           continue
         }
+        // No unvisited URLs left — if the current page has no useful interactives,
+        // terminate cleanly. The user explicitly chose end-cleanly over padding.
+        if (inventory.buttonCount + inventory.inputCount + inventory.searchCount === 0) {
+          logger.info('recorder: subpages exhausted and no interactives left — ending cleanly')
+          break
+        }
       }
 
-      const liveSteps = await planLiveSteps(ctx, allowNavigation)
-
-      // Track if this batch is scroll-only
-      const isScrollOnly = liveSteps.every(
-        (s) => s.action === 'scroll_down' || s.action === 'scroll_up',
-      )
-      if (isScrollOnly) {
+      const liveSteps = await planLiveSteps(ctx, allowNavigation, inventory)
+      // Track if this batch is scroll-only AFTER all enrichment (rejection
+      // retry, deterministic injection). If we still got pure scrolls,
+      // increment the counter so the next iteration knows to escape this page.
+      if (isScrollOnlyBatch(liveSteps)) {
         scrollOnlyBatches++
       } else {
         scrollOnlyBatches = 0
@@ -989,6 +1287,14 @@ export async function recordProduct(
       for (const step of liveSteps) {
         if (capturedClipDurationMs(scenes) >= targetDemoMs) break
         if (Date.now() - recordingStartTime >= maxWallClockMs) break
+        // Refuse to navigate back to a forbidden URL (entry/homepage).
+        if (step.action === 'navigate' && step.navigate_to) {
+          const key = urlKey(step.navigate_to)
+          if (key && forbiddenRevisits.has(key)) {
+            logger.info(`recorder: skipping navigate to forbidden URL ${step.navigate_to}`)
+            continue
+          }
+        }
         const scene = await captureStep(ctx, step, ++stepCounter)
         pushScene(scene)
         await handlePageAfterScene(ctx)
@@ -1050,6 +1356,7 @@ export async function recordProduct(
       tagline: understanding.tagline,
       totalScenes: scenes.length,
       scenes,
+      prerollMs,
     }
     fs.writeFileSync(
       path.join(outputDir, 'manifest.json'),

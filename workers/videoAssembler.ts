@@ -118,14 +118,32 @@ async function startAssetServer(
 /**
  * Filters out true noise only. Failed element finds still contain deliberate
  * fallback motion from the recorder, so they remain usable demo footage.
+ *
+ * Also drops or trims clips that would overlap the recording's preroll window
+ * (the leading goto + settle interval). The recorder is supposed to set
+ * clipStart AFTER preroll, but this is defense-in-depth: if any clip leaks
+ * into the loading window it would expose blank/loading frames in the final
+ * cut.
  */
-function filterProductiveScenes(scenes: SceneCapture[]): SceneCapture[] {
-  return scenes.filter((s) => {
-    if (!s.clips || s.clips.length === 0) return false
-    const firstClip = s.clips[0]
-    const duration = firstClip.end - firstClip.start
-    return duration >= 500
-  })
+function filterProductiveScenes(scenes: SceneCapture[], prerollMs: number = 0): SceneCapture[] {
+  return scenes
+    .map((s) => {
+      if (!s.clips || s.clips.length === 0) return s
+      const trimmedClips = s.clips
+        .map((clip) => {
+          if (clip.end <= prerollMs) return null
+          if (clip.start < prerollMs) return { start: prerollMs, end: clip.end }
+          return clip
+        })
+        .filter((c): c is NonNullable<typeof c> => c !== null)
+      return { ...s, clips: trimmedClips }
+    })
+    .filter((s) => {
+      if (!s.clips || s.clips.length === 0) return false
+      const firstClip = s.clips[0]
+      const duration = firstClip.end - firstClip.start
+      return duration >= 500
+    })
 }
 
 /**
@@ -159,12 +177,13 @@ export async function assembleVideo(options: AssembleVideoOptions): Promise<stri
     `assembleVideo [${jobId}]: manifest — ${manifest.totalScenes} scenes, product: ${manifest.productName}`
   )
 
-  const productiveScenes = filterProductiveScenes(manifest.scenes)
+  const prerollMs = manifest.prerollMs ?? 0
+  const productiveScenes = filterProductiveScenes(manifest.scenes, prerollMs)
   const totalClipMs = productiveScenes.reduce((total, scene) =>
     total + scene.clips.reduce((st, clip) => st + Math.max(0, clip.end - clip.start), 0), 0)
   logger.info(
     `assembleVideo [${jobId}]: ${productiveScenes.length}/${manifest.scenes.length} productive scenes, ` +
-    `${Math.round(totalClipMs / 1000)}s total clip duration`
+    `${Math.round(totalClipMs / 1000)}s total clip duration (preroll cut: ${prerollMs}ms)`
   )
   if (productiveScenes.length === 0) {
     throw new Error(

@@ -69,3 +69,51 @@ export async function retryWithBackoff<T>(
     `Failed after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`
   )
 }
+
+/**
+ * Cheap perceptual hash of a JPEG buffer. Samples evenly-spaced bytes from the
+ * compressed stream — JPEG is dominated by DCT coefficients so similar frames
+ * produce similar byte distributions. Not robust enough for content matching
+ * but more than enough to detect "the same scroll position 3 batches in a row".
+ */
+export function perceptualHash(buf: Buffer): string {
+  if (buf.length === 0) return '0'.repeat(16)
+  const samples = 16
+  const step = Math.max(1, Math.floor(buf.length / samples))
+  let bits = ''
+  for (let i = 0; i < samples; i++) {
+    const idx = Math.min(buf.length - 1, i * step)
+    bits += (buf[idx] >> 4).toString(16)
+  }
+  return bits
+}
+
+/**
+ * Hamming-style similarity between two perceptual hashes — counts matching nibbles.
+ * Returns a fraction 0–1, where 1 means identical.
+ */
+export function hashSimilarity(a: string, b: string): number {
+  if (!a || !b || a.length !== b.length) return 0
+  let same = 0
+  for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++
+  return same / a.length
+}
+
+/**
+ * Coarse brightness measurement of a JPEG buffer in 0..1. Approximates the
+ * average pixel luminance from the compressed stream — the first ~256 bytes
+ * after the SOI marker are JPEG headers (skipped); subsequent bytes correlate
+ * loosely with frame energy. Used to detect "white loading screen" frames
+ * (very high or very uniform). Cheap; not pixel-accurate.
+ */
+export function frameBrightness(buf: Buffer): number {
+  if (buf.length < 512) return 0.5
+  let sum = 0
+  let count = 0
+  for (let i = 256; i < Math.min(buf.length, 2048); i += 4) {
+    sum += buf[i]
+    count++
+  }
+  if (count === 0) return 0.5
+  return sum / (count * 255)
+}

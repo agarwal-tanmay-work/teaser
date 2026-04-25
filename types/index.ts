@@ -64,6 +64,14 @@ export interface SceneCapture {
   pageUrl: string
   /** Optional pre-computed word timings. When absent, captions distribute words evenly. */
   wordTimings?: WordTiming[]
+  /**
+   * Path to a representative JPEG screenshot taken mid-clip on disk.
+   * Populated by the recorder so the post-recording vision pass can
+   * regenerate captions to match what the viewer actually sees.
+   */
+  screenshotPath?: string
+  /** Cheap perceptual-hash signature of the post-action screenshot. Used to detect frozen/looping content. */
+  noveltyHash?: string
 }
 
 /** Manifest output from the browser recorder */
@@ -73,6 +81,44 @@ export interface RecordingManifest {
   tagline: string
   totalScenes: number
   scenes: SceneCapture[]
+  /**
+   * Wall-clock duration in ms reserved at the start of recording.mp4 for
+   * page-load and animation settle. No clip ever references this window;
+   * it's leading recording garbage that the assembler/Remotion ignore.
+   */
+  prerollMs?: number
+}
+
+/**
+ * Live snapshot of what's clickable / typeable on the currently loaded page.
+ * Built per page from the DOM right before each planning batch so the
+ * vision agent picks interactions that actually exist.
+ */
+export interface DomInventoryItem {
+  /** 'button' | 'link' | 'input' | 'search' */
+  kind: 'button' | 'link' | 'input' | 'search'
+  /** Visible text or accessible label (for inputs: placeholder or aria-label). */
+  text: string
+  /** Stable selector usable by Playwright's locator engine when text-find fails. */
+  selector: string
+  /** Bounding box at scan time (page may scroll, so consumers should re-find). */
+  box: ElementBox
+  /** True for buttons/links that look like a primary CTA (matches "sign up", "try", "start", etc.). */
+  primaryCta?: boolean
+  /** Semantic role of the input — informs realistic sample-text generation. */
+  inputType?: 'text' | 'search' | 'email' | 'password' | 'textarea' | 'tel' | 'url' | 'number'
+}
+
+/** Aggregated counts + shortlist returned by `scanDomInventory`. */
+export interface DomInventory {
+  buttonCount: number
+  linkCount: number
+  inputCount: number
+  searchCount: number
+  /** First strong primary CTA found, if any. */
+  primaryCta: DomInventoryItem | null
+  /** Top items for use in the planner prompt. Capped to ~12 entries. */
+  items: DomInventoryItem[]
 }
 
 /** Recorded click/interaction event for post-processing zoom effects */

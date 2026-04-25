@@ -4,6 +4,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
   interpolate,
+  Easing,
 } from 'remotion';
 import type { SceneCapture } from '../../types';
 
@@ -16,18 +17,23 @@ interface ClipMotionProps {
 }
 
 /**
- * Wraps a demo clip with motion to sell the moment:
- * - Scenes with a click target (`targetElement` set): smart zoom-in toward the
- *   element, brief hold, then zoom out. Origin is set to the element's
- *   centre so the frame feels drawn to where the action is.
- * - Scenes without a target (scroll / navigate / hover on nothing):
- *   no artificial zoom. The recorder already captured real browser motion,
- *   and adding Ken Burns to static recovery clips made failed demos look
- *   like looping screenshots.
+ * Wraps a demo clip with motion to sell interaction beats.
  *
- * All motion is clip-relative via `useCurrentFrame()` inside the child
- * `Sequence`, so zoom timings follow clip trim boundaries even when the
- * recording is jump-cut.
+ * Design: NO Ken-Burns drift. Slow scaling on every clip reads as a
+ * documentary, not a SaaS launch demo. Modern launch videos (Linear,
+ * Notion, Vercel, Stripe) cut hard and zoom only on the moment of action.
+ *
+ * Triggered ONLY on `click` and `type` actions on the lead clip of the
+ * scene. Curve: snap-zoom from 1.0 → 1.18 in ~0.33 s with cubic ease-out,
+ * then HOLD at 1.18 for the rest of the clip — no zoom-out drift. The
+ * jump cut at the next clip handles the visual reset cleanly.
+ *
+ * For `type` actions, a tiny mid-clip settle bounce sells the keystroke
+ * moment without becoming busy.
+ *
+ * Scroll, navigate, and hover clips: no motion. The recording itself
+ * already carries motion (scroll, page change, cursor); adding scale on
+ * top reads as artificial.
  */
 export const ClipMotion: React.FC<ClipMotionProps> = ({
   scene,
@@ -38,49 +44,49 @@ export const ClipMotion: React.FC<ClipMotionProps> = ({
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const t = clipDurFrames > 0
-    ? Math.min(1, Math.max(0, frame / clipDurFrames))
-    : 0;
-
   let scale = 1.0;
   let originX = 50;
   let originY = 50;
-  let translateX = 0;
-  let translateY = 0;
 
-  const hasClickTarget =
-    scene.targetElement !== null &&
+  const isInteraction =
     isLeadClip &&
-    (scene.action === 'click' || scene.action === 'type' || scene.action === 'hover');
+    scene.targetElement !== null &&
+    (scene.action === 'click' || scene.action === 'type');
 
-  if (hasClickTarget && scene.targetElement) {
-    // Origin at the element centre. Convert to percent of the 1920×1080 frame.
-    const cx = Math.max(8, Math.min(92, (scene.targetElement.x / 1920) * 100));
-    const cy = Math.max(8, Math.min(92, (scene.targetElement.y / 1080) * 100));
-    originX = cx;
-    originY = cy;
+  if (isInteraction && scene.targetElement) {
+    // Origin pinned to the element centre, clamped 8–92 % so zooms never
+    // crop edge elements out of frame.
+    originX = Math.max(8, Math.min(92, (scene.targetElement.x / 1920) * 100));
+    originY = Math.max(8, Math.min(92, (scene.targetElement.y / 1080) * 100));
 
-    // Smart zoom curve across the clip:
-    // 0.0 → 0.25: zoom in 1.00 → 1.12
-    // 0.25 → 0.75: hold 1.12 (click + result moment)
-    // 0.75 → 1.0:  zoom out 1.12 → 1.00
-    const zoomInPhase = interpolate(t, [0, 0.25], [1.0, 1.12], {
+    // Snap-zoom: 1.0 → 1.18 in ~10 frames (≈0.33 s on 30 fps), cubic ease-out.
+    const zoomInDur = Math.min(12, Math.max(6, Math.round(fps * 0.33)));
+    const punched = interpolate(frame, [0, zoomInDur], [1.0, 1.18], {
       extrapolateLeft: 'clamp',
       extrapolateRight: 'clamp',
+      easing: Easing.bezier(0.2, 0, 0, 1),
     });
-    const zoomOutPhase = interpolate(t, [0.75, 1.0], [1.12, 1.0], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    });
-    scale = Math.min(zoomInPhase, zoomOutPhase);
-  } else {
-    scale = 1.0;
-    translateX = 0;
-    translateY = 0;
+    scale = punched;
+
+    // For `type` actions, add a tiny mid-clip bounce (1.18 → 1.205 → 1.18)
+    // over 6 frames at the clip mid. Reads as the moment a query lands.
+    if (scene.action === 'type' && clipDurFrames > zoomInDur + 8) {
+      const bounceCenter = Math.round(clipDurFrames * 0.55);
+      const bouncePhase = interpolate(
+        frame,
+        [bounceCenter - 3, bounceCenter, bounceCenter + 3],
+        [0, 1, 0],
+        {
+          extrapolateLeft: 'clamp',
+          extrapolateRight: 'clamp',
+          easing: Easing.bezier(0.4, 0, 0.6, 1),
+        }
+      );
+      scale = punched + bouncePhase * 0.025;
+    }
   }
 
-  // Damped fade-in at clip head + fade-out at clip tail to smooth
-  // jump-cut edges. 6 frames (≈200 ms) on each side.
+  // 6-frame opacity fade at clip head and tail to smooth the jump-cut edges.
   const edgeFadeFrames = Math.min(6, Math.floor(clipDurFrames / 4));
   const opacity = interpolate(
     frame,
@@ -89,13 +95,10 @@ export const ClipMotion: React.FC<ClipMotionProps> = ({
     { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
   );
 
-  // Keep fps in scope for future motion tweaks that need time-based easing.
-  void fps;
-
   return (
     <AbsoluteFill
       style={{
-        transform: `scale(${scale}) translate(${translateX}px, ${translateY}px)`,
+        transform: `scale(${scale})`,
         transformOrigin: `${originX}% ${originY}%`,
         opacity,
         overflow: 'hidden',

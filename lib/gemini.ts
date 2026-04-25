@@ -1,4 +1,13 @@
-import type { ProductUnderstanding, VideoScript, VideoTone, VideoLength, DemoStep, ScriptSegment, InteractiveInventory } from '@/types'
+import type {
+  ProductUnderstanding,
+  VideoScript,
+  VideoTone,
+  VideoLength,
+  DemoStep,
+  ScriptSegment,
+  InteractiveInventory,
+  DomInventory,
+} from '@/types'
 import { logger } from '@/lib/logger'
 import * as https from 'https'
 
@@ -639,6 +648,8 @@ export async function planPageInteractions(
   understanding: ProductUnderstanding,
   visitedUrls: string[],
   allowNavigation: boolean = true,
+  inventory?: DomInventory,
+  rejectionHint?: string,
 ): Promise<DemoStep[]> {
   const visitedList = visitedUrls.length > 0
     ? `\nAlready visited (don't click links that go back to these): ${visitedUrls.slice(-5).join(', ')}`
@@ -648,35 +659,45 @@ export async function planPageInteractions(
     ? `6. You MAY include ONE final click on a visible nav link or CTA that leads to a different page — but ONLY after 2+ in-page interactions. This is how the video discovers subpages. Pick the most demo-worthy visible link (e.g. "Product", "Features", "Pricing", "Dashboard", "Try it", "Get started"). Skip links that go to already-visited URLs.`
     : `6. Do NOT click any link that navigates away from this page. Every action must keep the viewer on the current URL.`
 
+  const inventoryBlock = inventory && inventory.items.length > 0
+    ? `\n\nLIVE DOM INVENTORY (these elements ARE on the page right now — strongly prefer interacting with these):
+- Counts: ${inventory.buttonCount} buttons, ${inventory.linkCount} links, ${inventory.inputCount} inputs, ${inventory.searchCount} search fields.
+${inventory.primaryCta ? `- Primary CTA visible: "${inventory.primaryCta.text}" (${inventory.primaryCta.kind}).\n` : ''}- Available elements (use these EXACT strings for element_to_click):
+${inventory.items.map((it) => `  • ${it.kind}: "${it.text}"`).join('\n')}
+
+ADAPTIVE STRATEGY based on the inventory above:
+- If a search field exists → type a realistic query into it (the most demo-worthy interaction).
+- If text inputs exist → type a realistic example showing what users would actually enter.
+- If a primary CTA exists → click it (it's the most important button on the page).
+- If buttons exist but no inputs → click 2-3 of the most informative buttons.
+- If only marketing copy is visible (no real interactives) → 1 scroll then move on, do NOT linger.`
+    : `\n\nNo DOM inventory available — read the screenshot carefully and pick interactions that are visibly clickable or typeable.`
+
+  const rejectBlock = rejectionHint ? `\n\n⚠ FEEDBACK FROM PREVIOUS ATTEMPT: ${rejectionHint}\nChoose interactions that demonstrate the product, not just scroll. Type into a real input or click a real button this time.` : ''
+
   const prompt = `You are directing a professional SaaS startup demo video. Look at this live screenshot.
 
 Product: ${productName}
 Current URL: ${pageUrl}
-Key features to highlight: ${understanding.top_5_features.slice(0, 5).join(', ')}${visitedList}
+Key features to highlight: ${understanding.top_5_features.slice(0, 5).join(', ')}${visitedList}${inventoryBlock}${rejectBlock}
 
-Generate 3-6 actions that demonstrate what's actually visible on THIS page, then optionally navigate to the next page by clicking a visible link.
-
-STRATEGY per page type:
-- Marketing/landing page: scroll to reveal more, hover/click a feature card to show detail, type in any visible search/demo field, THEN optionally click a nav link.
-- Feature or product page: click into feature cards or tabs to show depth, type a realistic query if a demo field is visible, THEN optionally navigate on.
-- Dashboard/app (authed): click a sidebar item, open a row or tab, type in a real input field to show the product in action.
+Generate 3-6 actions that demonstrate what's actually visible on THIS page. Match the action mix to what the page actually offers — do not force interactions that aren't there, but do not default to scrolling when real interactions ARE available.
 
 CRITICAL RULES:
 1. ONLY use "click", "scroll_down", "scroll_up", "type", or "hover" actions. NEVER "navigate" (the system handles navigation by clicking links you identify).
-2. For EVERY click/type: element_to_click must be EXACT visible text from the screenshot. Read it character-for-character. Do not invent, translate, or paraphrase.
-3. Only reference elements you can actually SEE in this screenshot. If you can't see something, don't mention it.
-4. For "type": element_to_click is the visible field label or placeholder; type_text is a realistic example (e.g. "quarterly report", "acme corp").
-5. Never click login / signup / register / auth / password / logout links.
+2. For EVERY click/type: element_to_click must be EXACT visible text. Prefer text from the LIVE DOM INVENTORY above. Do not invent, translate, or paraphrase.
+3. Only reference elements you can actually SEE or that appear in the inventory.
+4. For "type": element_to_click is the field label/placeholder; type_text is a realistic example tied to the product (e.g. for a search bar on an analytics tool: "Q3 revenue by region").
+5. Never click login / signup / register / auth / password / logout links — but DO click "Try it free", "Get started", "See demo", primary CTAs that don't gate behind credentials.
 ${navRule}
-7. MINIMUM 2 in-page interactions (scroll, click feature, type) BEFORE any navigation click. A video that just jumps between pages without showing anything is useless.
-8. Each narration: 1 vivid sentence, naming "${productName}" when natural.
+7. Prefer click/type over scroll when both are possible. A demo of an interactive product should show interaction, not just scrolling marketing copy. If the page genuinely has nothing interactive (pure marketing), one scroll is fine — but only one.
+8. Each narration: 1 vivid sentence, 6-12 words, naming "${productName}" when natural. Describe the OUTCOME of the interaction, not the mechanics.
 
 Return ONLY valid JSON (no markdown):
 {"steps": [
-  {"step": 1, "action": "scroll_down", "description": "Reveal the product showcase below the hero", "narration": "${productName} is designed to feel immediate."},
+  {"step": 1, "action": "type", "description": "Type a realistic query into the search field", "narration": "Finding insights in ${productName} takes seconds.", "element_to_click": "Search", "type_text": "quarterly revenue"},
   {"step": 2, "action": "click", "description": "Open the automation feature card", "narration": "Here's how ${productName} automates the workflow.", "element_to_click": "Automated workflows"},
-  {"step": 3, "action": "type", "description": "Try a realistic search query", "narration": "Finding anything takes seconds.", "element_to_click": "Search", "type_text": "quarterly revenue"},
-  {"step": 4, "action": "click", "description": "Navigate to the pricing page via the top nav", "narration": "And the pricing is as simple as the product.", "element_to_click": "Pricing"}
+  {"step": 3, "action": "click", "description": "Click the primary CTA", "narration": "Getting started with ${productName} takes one click.", "element_to_click": "Try it free"}
 ]}`
 
   const visionModels = VISION_MODEL_CHAIN
@@ -715,30 +736,181 @@ Return ONLY valid JSON (no markdown):
     }
   }
 
-  logger.warn('planPageInteractions: all vision models failed — emitting canned scroll fallback')
-  // Canned fallback so the video never dead-stares at a static page. The
-  // narration stays generic but usable and the scroll motion keeps frames
-  // moving, which is always better than a frozen stare.
+  logger.warn('planPageInteractions: all vision models failed — emitting inventory-driven fallback')
+  return inventoryDrivenFallback(inventory, productName)
+}
+
+/**
+ * Deterministic fallback when Gemini Vision is fully unavailable. Picks the
+ * most demo-worthy interaction available from the live DOM inventory:
+ *   1. Type into a search field if one is visible.
+ *   2. Click the primary CTA if one was detected.
+ *   3. Click the first input field (might be email capture).
+ *   4. Click the first button.
+ *   5. Single scroll if literally nothing interactive is available.
+ *
+ * Always better than the old 3-scroll canned fallback because it shows real
+ * interaction with whatever the page offers.
+ */
+function inventoryDrivenFallback(
+  inventory: DomInventory | undefined,
+  productName: string,
+): DemoStep[] {
+  if (!inventory || inventory.items.length === 0) {
+    return [
+      {
+        step: 1,
+        action: 'scroll_down',
+        description: 'Scroll to reveal the product below the fold',
+        narration: `Here's ${productName} in action.`,
+      },
+    ]
+  }
+
+  const search = inventory.items.find((it) => it.kind === 'search')
+  if (search) {
+    const seed = productName.split(' ')[0].toLowerCase()
+    return [
+      {
+        step: 1,
+        action: 'type',
+        description: 'Type a realistic query into the search field',
+        narration: `Search inside ${productName} is **instant**.`,
+        element_to_click: search.text,
+        type_text: `${seed} workflow`,
+      },
+    ]
+  }
+
+  if (inventory.primaryCta) {
+    return [
+      {
+        step: 1,
+        action: 'click',
+        description: `Click the primary CTA "${inventory.primaryCta.text}"`,
+        narration: `Getting started with ${productName} is **one click**.`,
+        element_to_click: inventory.primaryCta.text,
+      },
+    ]
+  }
+
+  const input = inventory.items.find((it) => it.kind === 'input')
+  if (input) {
+    return [
+      {
+        step: 1,
+        action: 'type',
+        description: 'Type a realistic value into the visible field',
+        narration: `${productName} keeps inputs **simple**.`,
+        element_to_click: input.text,
+        type_text: input.inputType === 'email' ? 'demo@example.com' : `Try ${productName}`,
+      },
+    ]
+  }
+
+  const button = inventory.items.find((it) => it.kind === 'button')
+  if (button) {
+    return [
+      {
+        step: 1,
+        action: 'click',
+        description: `Click the "${button.text}" button`,
+        narration: `Inside ${productName} every action is **direct**.`,
+        element_to_click: button.text,
+      },
+    ]
+  }
+
   return [
     {
       step: 1,
       action: 'scroll_down',
-      description: 'Scroll to reveal the product below the fold',
-      narration: `Here's ${productName} in action.`,
-    },
-    {
-      step: 2,
-      action: 'scroll_down',
-      description: 'Continue scrolling to surface more detail',
-      narration: `Every detail is crafted for clarity.`,
-    },
-    {
-      step: 3,
-      action: 'scroll_up',
-      description: 'Return to the top of the page',
-      narration: `Built for the way modern teams actually work.`,
+      description: 'Scroll to reveal more of the page',
+      narration: `Here's more of ${productName}.`,
     },
   ]
+}
+
+/**
+ * Per-clip vision-based caption rewrite. After recording, every scene gets
+ * its narration regenerated by sending the actual mid-clip screenshot to
+ * Gemini Vision and asking for a 6-12 word caption that matches what the
+ * viewer is seeing. Replaces the upfront, planned caption that may not
+ * match the recorded reality.
+ *
+ * Returns one polished narration per scene, in order. Falls back to the
+ * existing scene narration on per-call failure (never throws — caption
+ * sync is best-effort).
+ */
+export async function regenerateNarrationsFromVision(
+  scenes: Array<{ description: string; narration: string; action: string; pageUrl: string; screenshotBase64?: string }>,
+  productName: string,
+  understanding: { tagline: string; core_value_prop: string; problem_being_solved: string; top_5_features: string[] },
+): Promise<string[]> {
+  if (scenes.length === 0) return []
+
+  const banned = `"unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly"`
+  const out: string[] = []
+
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i]
+    const positionHint = i === 0
+      ? 'This is the HOOK (first scene).'
+      : i === scenes.length - 1
+        ? 'This is the closing CTA.'
+        : i === scenes.length - 2
+          ? 'This is the proof / category claim before the CTA.'
+          : `Middle of arc (${i + 1}/${scenes.length}) — show the product in action.`
+
+    if (!scene.screenshotBase64) {
+      out.push(scene.narration)
+      continue
+    }
+
+    const prompt = `You are writing a single 6-12 word caption for one scene of a silent product demo video.
+
+Product: ${productName}
+Tagline: ${understanding.tagline}
+Value proposition: ${understanding.core_value_prop}
+Problem solved: ${understanding.problem_being_solved}
+
+Scene action: ${scene.action}
+Page URL: ${scene.pageUrl}
+Position: ${positionHint}
+
+The screenshot below shows the EXACT frame the viewer will see for this scene. Write ONE caption that:
+1. Describes what is visible AND/OR the outcome of the action — never invent features or text not in the image.
+2. Is 6-12 words, ONE sentence, present tense, active voice, second person or imperative.
+3. Wraps 1-2 high-impact words in **double asterisks** (these render amber in the karaoke captions). Pick verbs and concrete nouns, not filler.
+4. Avoids these banned phrases: ${banned}.
+5. Uses "${productName}" by name when natural — but not in every caption.
+6. Does NOT narrate the mechanic ("now we click", "as you can see"). Deliver the value claim.
+
+Return ONLY the caption text. No quotes, no markdown, no JSON, no explanation.`
+
+    let caption: string | null = null
+    for (const visionModel of VISION_MODEL_CHAIN) {
+      try {
+        const text = await withTimeout(
+          callGeminiVision(visionModel, prompt, scene.screenshotBase64),
+          30_000,
+          `gemini:regenerateNarration:${visionModel}`,
+        )
+        const trimmed = text.replace(/^["'`\s]+|["'`\s]+$/g, '').replace(/\n+/g, ' ').trim()
+        if (trimmed && trimmed.length >= 8 && trimmed.length <= 200) {
+          caption = trimmed
+          break
+        }
+      } catch (err) {
+        if (isQuotaExhausted(err)) continue
+        logger.warn(`regenerateNarrationsFromVision: ${visionModel} failed for scene ${i + 1}`, { err })
+      }
+    }
+    out.push(caption ?? scene.narration)
+  }
+
+  logger.info(`gemini: regenerated ${out.filter((c, i) => c !== scenes[i].narration).length}/${scenes.length} narrations from screenshots`)
+  return out
 }
 
 /**
@@ -822,7 +994,7 @@ export async function polishRecordedNarrations(
     raw: s.narration,
   }))
 
-  const prompt = `You are rewriting captions for a silent-friendly product demo video of "${productName}".
+  const prompt = `You are LIGHTLY polishing captions for a silent-friendly product demo video of "${productName}". Each input caption was carefully written to MATCH WHAT IS ON SCREEN in its scene — your job is to improve flow and arc without changing the subject of any caption.
 
 PRODUCT: ${productName}
 TAGLINE: ${understanding.tagline}
@@ -830,25 +1002,24 @@ VALUE PROP: ${understanding.core_value_prop}
 PROBLEM SOLVED: ${understanding.problem_being_solved}
 KEY FEATURES: ${understanding.top_5_features.join(', ')}
 
-Below are the ${scenes.length} scenes that were ACTUALLY recorded. Each has a raw narration from the live recording session. Your job is to rewrite every narration into a coherent narrative arc.
+Below are the ${scenes.length} scenes that were ACTUALLY recorded, with captions that already reflect what the viewer sees on screen. Polish them for narrative flow.
 
 SCENES:
 ${JSON.stringify(sceneList, null, 1)}
 
 RULES:
-1. Return a JSON array of exactly ${scenes.length} strings — one polished narration per scene, in order.
-2. Follow this arc across the full sequence:
-   - First 10-15%: HOOK — provocative claim or pain point. Never "Introducing ${productName}".
-   - Next 10-15%: PROBLEM — specific, concrete pain.
-   - Middle 50-60%: PRODUCT IN ACTION — one outcome per caption. Show what ${productName} DOES, not that it exists.
-   - Next 10%: PROOF or category claim.
-   - Last caption: CTA — short, directive.
-3. Each narration: ONE sentence, 6-14 words. Present tense, active voice.
-4. Use **double asterisks** on 1-2 emphasis words per narration (these render as amber in captions).
-5. Reference "${productName}" by name at least 3 times across all narrations.
-6. NEVER repeat the same narration. Every single one must be unique.
-7. BANNED: "unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly".
-8. Do NOT describe what's happening on screen ("now we click", "as you can see"). The video SHOWS that. The caption DELIVERS the value claim.
+1. Return a JSON array of exactly ${scenes.length} strings — one polished caption per scene, in order.
+2. PRESERVE the content of each input caption. Keep the same verbs, feature nouns, and concrete details. Do NOT introduce content that isn't already there or in the scene description — the captions must still match the actual recorded frames.
+3. Improve sentence rhythm, replace generic words with concrete ones, refine emphasis markup, and ensure adjacent captions don't repeat the same sentence shape.
+4. The overall arc across the sequence:
+   - First caption: should read as a HOOK (provocative or specific). Never "Introducing ${productName}".
+   - Last caption: should read as a CTA — short, directive.
+   - Middle captions: each should sell ONE outcome rather than describing UI mechanics.
+5. Each caption: ONE sentence, 6-14 words, present tense, active voice.
+6. Use **double asterisks** on 1-2 emphasis words per caption (these render amber in karaoke). Verbs and numbers, not filler.
+7. NEVER repeat the same caption. Every single one must be unique.
+8. BANNED: "unlock productivity", "streamline workflow", "powerful platform", "seamless experience", "revolutionary", "game-changing", "empowers teams", "supercharge", "effortlessly".
+9. Do NOT describe the mechanic ("now we click", "as you can see"). The video SHOWS that. The caption DELIVERS the value claim.
 
 Return ONLY a JSON array of strings, nothing else.`
 

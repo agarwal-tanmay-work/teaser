@@ -9,7 +9,7 @@ import { createServiceClient } from '../lib/supabase'
 import { logger } from '../lib/logger'
 import { crawlSite } from '../lib/firecrawl'
 import { reconSite } from '../lib/recon'
-import { understandProduct, generateScript, polishRecordedNarrations } from '../lib/gemini'
+import { understandProduct, generateScript, polishRecordedNarrations, regenerateNarrationsFromVision } from '../lib/gemini'
 import { ffprobeDurationMs } from '../lib/ffmpegUtils'
 import { recordProduct } from './browserRecorder'
 import {
@@ -317,13 +317,22 @@ RETRY POLICY:
 
     await updateProgress(jobId, 60, 'Demo recorded. Polishing captions...')
 
-    // ─── STAGE 3b: Post-Recording Narration Polish ─────────────────────────
-    // Load the manifest, rewrite narrations into a coherent arc, save back
+    // ─── STAGE 3b: Post-Recording Narration — vision rewrite + arc polish ──
+    // Two passes: first ground each caption in its actual on-screen frame
+    // (regenerateNarrationsFromVision), then lightly polish the sequence for
+    // narrative arc (polishRecordedNarrations) without changing content.
     {
       const manifestPath = path.join(recordingDir, 'manifest.json')
       if (fs.existsSync(manifestPath)) {
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
-          scenes: Array<{ description: string; narration: string; action: string; pageUrl: string; clips: Array<{ start: number; end: number }> }>
+          scenes: Array<{
+            description: string
+            narration: string
+            action: string
+            pageUrl: string
+            clips: Array<{ start: number; end: number }>
+            screenshotPath?: string
+          }>
           [key: string]: unknown
         }
 
@@ -343,20 +352,50 @@ RETRY POLICY:
 
         logger.info(`videoProcessor: ${jobId} — total clip duration: ${Math.round(totalClipMs / 1000)}s (target: ${Math.round(targetMs / 1000)}s)`)
 
-        // Polish narrations into a coherent arc
-        await updateProgress(jobId, 63, 'Writing professional captions...')
+        // Pass 1: per-scene vision-grounded narration. For each scene, send
+        // its reference screenshot to Gemini Vision and get a caption that
+        // matches what is actually visible.
+        await updateProgress(jobId, 62, 'Matching captions to your video...')
+        const visionScenes = manifest.scenes.map((s) => {
+          let screenshotBase64: string | undefined
+          if (s.screenshotPath && fs.existsSync(s.screenshotPath)) {
+            try {
+              screenshotBase64 = fs.readFileSync(s.screenshotPath).toString('base64')
+            } catch {
+              screenshotBase64 = undefined
+            }
+          }
+          return {
+            description: s.description,
+            narration: s.narration,
+            action: s.action,
+            pageUrl: s.pageUrl,
+            screenshotBase64,
+          }
+        })
+        const visionGrounded = await regenerateNarrationsFromVision(
+          visionScenes,
+          understanding.product_name,
+          understanding,
+        )
+        for (let i = 0; i < manifest.scenes.length && i < visionGrounded.length; i++) {
+          manifest.scenes[i].narration = visionGrounded[i]
+        }
+
+        // Pass 2: light arc polish that preserves the vision-grounded content
+        // and only smooths the narrative flow.
+        await updateProgress(jobId, 65, 'Polishing the narrative arc...')
         const polished = await polishRecordedNarrations(
           manifest.scenes,
           understanding.product_name,
           understanding,
         )
-
         for (let i = 0; i < manifest.scenes.length && i < polished.length; i++) {
           manifest.scenes[i].narration = polished[i]
         }
 
         fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
-        logger.info(`videoProcessor: ${jobId} — narrations polished and manifest updated`)
+        logger.info(`videoProcessor: ${jobId} — narrations grounded + polished, manifest updated`)
       }
     }
 
