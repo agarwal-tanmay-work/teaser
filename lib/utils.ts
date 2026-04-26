@@ -196,6 +196,22 @@ export function domFingerprintScript(): { nodeCount: number; textLength: number 
       if (t) textLength += t.length
     })
   }
+  // SPAs often replace content inside ONE container without changing list-style
+  // children counts (e.g. a chat response rendered into a single bubble div).
+  // Pick up text length changes inside main / [role=main] / common SPA roots
+  // so the outcome detector fires on those products too.
+  const containers = [
+    'main',
+    '[role=main]',
+    'section[data-testid]',
+  ]
+  for (const sel of containers) {
+    const node = document.querySelector(sel)
+    if (node) {
+      const t = (node as HTMLElement).innerText
+      if (t) textLength += t.length
+    }
+  }
   return { nodeCount, textLength }
 }
 
@@ -210,11 +226,13 @@ export interface DomFingerprint {
  * Returns true when two fingerprints differ enough that a viewer would notice.
  * Threshold chosen to ignore micro-DOM jitter (timestamps, focus rings) while
  * still firing on the typical "search results appeared" delta (≥3 nodes or
- * ≥200 chars of new visible text).
+ * ≥120 chars of new visible text). The 120-char threshold catches SPA
+ * single-container updates (chat replies, inline form confirmations) that
+ * the prior 200-char threshold under-detected.
  */
 export function fingerprintsDiffer(before: DomFingerprint, after: DomFingerprint): boolean {
   if (before.url !== after.url) return true
   const nodeDelta = Math.abs(after.nodeCount - before.nodeCount)
   const textDelta = Math.abs(after.textLength - before.textLength)
-  return nodeDelta >= 3 || textDelta >= 200
+  return nodeDelta >= 3 || textDelta >= 120
 }

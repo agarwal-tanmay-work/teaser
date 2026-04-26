@@ -131,9 +131,13 @@ export interface SceneCapture {
   /** Role within the beat — assembler weighs `commit` + `reveal` clips longer. */
   beatStepRole?: BeatStepRole
   /** How the runtime confirmed the beat outcome (or that it gave up). */
-  outcomeKind?: 'url' | 'dom' | 'network' | 'timeout' | 'none'
+  outcomeKind?: 'url' | 'dom' | 'network' | 'aria-live' | 'timeout' | 'none'
   /** Path to the post-commit reveal screenshot — preferred over the typing-finish frame for caption regen. */
   outcomeScreenshotPath?: string
+  /** Which branch of the commitInput cascade fired (or 'skipped' when no commit was attempted). */
+  commitKind?: 'form-submit' | 'sibling-button' | 'enter' | 'blur' | 'skipped'
+  /** Wall-clock ms spent waiting for the outcome — useful for diagnosing slow products / timeouts. */
+  outcomeMs?: number
 }
 
 /** Manifest output from the browser recorder */
@@ -155,6 +159,26 @@ export interface RecordingManifest {
    * least 2 entries with `status === 'achieved'`.
    */
   beats?: DemoBeat[]
+  /**
+   * Aggregate counters for post-hoc diagnosis. Populated at the end of
+   * `recordProduct` so the videoProcessor (and any verification harness)
+   * can flag pipeline regressions without re-running the recorder.
+   */
+  diagnostics?: RecordingDiagnostics
+}
+
+/** Aggregate counters surfaced on the manifest for post-run diagnosis. */
+export interface RecordingDiagnostics {
+  /** How many beats reached `status === 'achieved'`. */
+  beatsAchieved: number
+  /** How many beats ran but were abandoned. */
+  beatsAbandoned: number
+  /** Total scenes whose action was 'type'. */
+  typesTotal: number
+  /** Subset of typesTotal where the runtime detected a real outcome (not timeout/none). */
+  typesWithOutcome: number
+  /** Reason the live loop ended — see recorder log lines for matching messages. */
+  endReason: 'queue-empty' | 'stuck' | 'live-batch-cap' | 'wall-clock-cap' | 'target-met'
 }
 
 /**

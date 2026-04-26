@@ -287,11 +287,17 @@ CRITICAL RULES:
 9. For "type" actions: element_to_click must be an input field label/placeholder from the VERIFIED INTERACTIVE ELEMENTS list. Use realistic example text that demonstrates the product.
 10. After every navigate, include 1-2 click/hover/scroll steps on that page before the next navigate so the viewer sees what's on each page.
 11. PREFER click-based navigation over navigate actions when a nav link exists in the verified elements. Clicking a visible link produces a more natural demo than a hard page load.
-12. ALSO output 2-3 PROPOSED BEATS — each beat is one complete open→setup→commit→reveal demonstration of a single capability the product has. A beat is the unit of demonstration: type into a search field then press Enter and let results render; fill a form then click Submit and let the confirmation render; send a chat message and let the response render. The recorder uses these beats to structure the video around what the product DOES, not just pages it has. Each beat must:
+12. ⚠️ MOST IMPORTANT FIELD — PROPOSED BEATS. The recorder uses proposed_beats as the SOLE source of demo footage. If this array is short, malformed, or missing, the resulting video will be empty or incoherent. You MUST output AT LEAST 3 beats. Each beat is one complete open→setup→commit→reveal demonstration of a single capability the product has. A beat is the unit of demonstration: type into a search field then press Enter and let results render; fill a form then click Submit and let the confirmation render; send a chat message and let the response render. AT MOST 2 of the beats may use goal "open_feature" (which has no commit step) — every other beat MUST be commit-bearing (search, form_submit, chat_send, or configure_and_run) when the product has any input affordance. Each beat must:
     - have a "goal" ∈ ["search", "form_submit", "chat_send", "configure_and_run", "open_feature", "navigate_explore"]
     - have an "outcomeDescription" describing what the viewer will see after the commit (e.g. "search results for the query render below the input")
-    - have a "targetUrl" picked from VERIFIED SUBPAGES (the page where this beat plays out — never the login/signup/auth page)
+    - have a "targetUrl" picked from VERIFIED SUBPAGES (the page where this beat plays out — never the login/signup/auth page, NEVER the entry/homepage URL itself; pick the subpage closest to the feature)
     - have an "inputHint" with REALISTIC sample text matching the product's actual domain when the beat involves typing (a search query for a search bar, a chat message for a chat box, a name+email for a form). Domain-match: a database tool gets a query, a fitness app gets a workout name, a design tool gets a project title. Never "test", "hello", "asdf", or "quarterly revenue" unless the product is actually a finance/analytics tool.
+
+GOOD vs BAD beat examples:
+✅ GOOD: { "id": "beat-1", "goal": "search", "outcomeDescription": "matching API references appear in the results panel", "targetUrl": "https://example.com/docs", "inputHint": "rate limiting", "steps": [], "status": "pending", "attempts": 0 }
+❌ BAD (no targetUrl): { "id": "beat-2", "goal": "search", "outcomeDescription": "search works", "inputHint": "test" }
+❌ BAD (targetUrl is entry URL — homepage loop-back): { "id": "beat-3", "goal": "open_feature", "outcomeDescription": "see homepage", "targetUrl": "https://example.com/" }
+❌ BAD (vague outcomeDescription, generic inputHint): { "id": "beat-4", "goal": "form_submit", "outcomeDescription": "form submitted", "targetUrl": "https://example.com/contact", "inputHint": "test" }
 13. ⚠️ USER PRIORITY OVERRIDE: When the ADDITIONAL CONTEXT FROM THE USER block below contains a description and/or "Key features/flows the user specifically wants shown", those answers take ABSOLUTE PRIORITY over your inferred top_5_features. Specifically:
     - Your proposed_beats MUST cover the user's listed features in the order the user listed them. The first beat demonstrates the user's first stated feature, the second beat their second, etc.
     - If the user described what the product does, every beat's outcomeDescription must align with that description — do not propose beats demonstrating capabilities the user did not mention if the user-stated features still need coverage.
@@ -495,12 +501,51 @@ function repairProposedBeats(raw: unknown[], productName: string, fallbackUrl: s
   return out
 }
 
+/**
+ * URL-key forms (host + pathname) we treat as "the entry / homepage" and
+ * keep out of demo_flow / key_pages_to_visit / synthesised beats. Includes
+ * the apex/www sibling so cross-subdomain home variants are filtered too.
+ */
+function entryUrlKeys(url: string): Set<string> {
+  const out = new Set<string>()
+  try {
+    const u = new URL(url)
+    const path = u.pathname.replace(/\/+$/, '') || '/'
+    out.add(`${u.host}${path}`)
+    const altHost = u.host.startsWith('www.') ? u.host.slice(4) : `www.${u.host}`
+    out.add(`${altHost}${path}`)
+  } catch { /* ignore */ }
+  return out
+}
+
+function urlKeyOf(u: string): string | null {
+  try {
+    const parsed = new URL(u)
+    const path = parsed.pathname.replace(/\/+$/, '') || '/'
+    return `${parsed.host}${path}`
+  } catch {
+    return null
+  }
+}
+
 function repairProductUnderstanding(raw: unknown, url: string): ProductUnderstanding {
   const p = (raw as Record<string, unknown>) ?? {}
 
   const productName = (typeof p.product_name === 'string' ? p.product_name : null) ??
     (typeof p.name === 'string' ? p.name : null) ?? 'Product Demo'
   const problemSolved = (typeof p.problem_being_solved === 'string' ? p.problem_being_solved : null) ?? 'workflow inefficiency'
+
+  const entryKeys = entryUrlKeys(url)
+
+  // Filter key_pages_to_visit to drop the entry URL and its alt-host sibling
+  // BEFORE downstream code (demo_flow augmentation, beat synthesis) reads it.
+  const rawKeyPages = Array.isArray(p.key_pages_to_visit) ? p.key_pages_to_visit as unknown[] : []
+  const cleanKeyPages = rawKeyPages
+    .filter((u): u is string => typeof u === 'string' && u.startsWith('http') && !u.includes('#'))
+    .filter((u) => {
+      const k = urlKeyOf(u)
+      return k !== null && !entryKeys.has(k)
+    })
 
   const repaired: ProductUnderstanding = {
     product_name: productName,
@@ -511,7 +556,7 @@ function repairProductUnderstanding(raw: unknown, url: string): ProductUnderstan
     brand_tone: (typeof p.brand_tone === 'string' ? p.brand_tone : null) ?? 'professional',
     product_category: (typeof p.product_category === 'string' ? p.product_category : null) ?? 'software',
     problem_being_solved: problemSolved,
-    key_pages_to_visit: Array.isArray(p.key_pages_to_visit) ? p.key_pages_to_visit as string[] : [],
+    key_pages_to_visit: cleanKeyPages,
     demo_flow: [],
     proposed_beats: Array.isArray(p.proposed_beats) ? repairProposedBeats(p.proposed_beats, productName, url) : [],
   }
@@ -523,16 +568,19 @@ function repairProductUnderstanding(raw: unknown, url: string): ProductUnderstan
   if (Array.isArray(rawFlow) && rawFlow.length > 0) {
     repaired.demo_flow = rawFlow.map((s: unknown, i: number) => repairDemoStep(s, i, url))
 
-    // Strip demo_flow navigate steps whose target is an in-page anchor (#section) —
-    // those don't actually change the page and lead to "stuck on landing page" output.
-    const realNavigates = repaired.demo_flow.filter(
-      (s) => s.action === 'navigate' && s.navigate_to?.startsWith('http') && !s.navigate_to.includes('#')
-    )
+    // Strip demo_flow navigate steps whose target is the entry URL itself
+    // (homepage loop-back) or an in-page anchor (#section).
+    repaired.demo_flow = repaired.demo_flow.filter((s) => {
+      if (s.action !== 'navigate') return true
+      if (!s.navigate_to || !s.navigate_to.startsWith('http') || s.navigate_to.includes('#')) return false
+      const k = urlKeyOf(s.navigate_to)
+      return k !== null && !entryKeys.has(k)
+    })
+
+    const realNavigates = repaired.demo_flow.filter((s) => s.action === 'navigate')
     // Augment with key_pages_to_visit when Gemini only returned anchors or too-few navigates
-    if (realNavigates.length < 3 && Array.isArray(p.key_pages_to_visit)) {
-      const keyPages = (p.key_pages_to_visit as unknown[])
-        .filter((u): u is string => typeof u === 'string' && u.startsWith('http') && !u.includes('#'))
-        .slice(0, 5)
+    if (realNavigates.length < 3 && cleanKeyPages.length > 0) {
+      const keyPages = cleanKeyPages.slice(0, 5)
       const existingUrls = new Set(realNavigates.map((s) => s.navigate_to))
       for (const pageUrl of keyPages) {
         if (!existingUrls.has(pageUrl)) {
@@ -700,7 +748,100 @@ Remember:
     parsed.top_5_features = mergeUserFeaturesFirst(features, parsed.top_5_features)
     parsed.proposed_beats = reorderBeatsByUserFeatures(features, parsed.proposed_beats ?? [])
   }
+
+  // Synthesise additional beats if the model returned fewer than 3. The
+  // BeatRunner is the SOLE source of demo footage now (seed phase removed),
+  // so a thin proposed_beats list directly translates to a thin video.
+  if ((parsed.proposed_beats?.length ?? 0) < 3) {
+    parsed.proposed_beats = [
+      ...(parsed.proposed_beats ?? []),
+      ...synthesiseBeatsFromFeatures(parsed, productUrl, 3 - (parsed.proposed_beats?.length ?? 0)),
+    ]
+  }
   return parsed
+}
+
+/**
+ * Domain-aware goal classifier. Maps a feature blurb to the BeatGoal that
+ * best demonstrates it. Falls through to `open_feature` when nothing matches.
+ */
+function inferBeatGoalFromFeature(feature: string): BeatGoal {
+  const f = feature.toLowerCase()
+  if (/search|find|query|filter|lookup/.test(f)) return 'search'
+  if (/chat|ask|prompt|message|reply|respond/.test(f)) return 'chat_send'
+  if (/submit|sign\s?up|signup|register|book|contact|apply|email|subscribe|join/.test(f)) return 'form_submit'
+  if (/run|generate|build|configure|deploy|render|compile|train|optimi[sz]e|process/.test(f)) return 'configure_and_run'
+  if (/explore|browse|navigate|tour|walkthrough/.test(f)) return 'navigate_explore'
+  return 'open_feature'
+}
+
+/**
+ * Picks the most relevant `key_pages_to_visit` URL for a feature using a
+ * simple substring overlap heuristic. Falls back to the first non-entry
+ * subpage, then to the entry URL itself if no subpages are available.
+ */
+function pickTargetUrlForFeature(feature: string, understanding: ProductUnderstanding, fallbackUrl: string): string {
+  const tokens = feature.toLowerCase().split(/\W+/).filter((t) => t.length > 3)
+  for (const candidate of understanding.key_pages_to_visit) {
+    try {
+      const path = new URL(candidate).pathname.toLowerCase()
+      if (tokens.some((t) => path.includes(t))) return candidate
+    } catch { /* ignore */ }
+  }
+  return understanding.key_pages_to_visit[0] ?? fallbackUrl
+}
+
+/**
+ * Builds a short, realistic input hint matched to the goal + feature copy.
+ * Used as the default `inputHint` on synthesised beats so the recorder types
+ * something specific instead of generic "Try ${productName}" filler.
+ */
+function inputHintForGoal(goal: BeatGoal, feature: string, productName: string): string | undefined {
+  const trimmed = feature.replace(/\.+$/, '').trim()
+  const concise = trimmed.length > 0 && trimmed.length < 50 ? trimmed : `${productName} ${goal.replace('_', ' ')}`
+  switch (goal) {
+    case 'search': return concise.slice(0, 50)
+    case 'chat_send': return `Tell me about ${concise.slice(0, 40)}`.slice(0, 60)
+    case 'form_submit': return 'demo@example.com'
+    case 'configure_and_run': return concise.slice(0, 40)
+    default: return undefined
+  }
+}
+
+/**
+ * Synthesises up to N beats from the product's `top_5_features` when the
+ * model returned too few. Each synthetic beat picks a goal from the feature
+ * text, points at the most-relevant subpage, and carries an input hint
+ * derived from the feature copy.
+ */
+function synthesiseBeatsFromFeatures(
+  understanding: ProductUnderstanding,
+  productUrl: string,
+  count: number,
+): DemoBeat[] {
+  const out: DemoBeat[] = []
+  const features = understanding.top_5_features ?? []
+  const existingIds = new Set((understanding.proposed_beats ?? []).map((b) => b.id))
+  for (const feature of features) {
+    if (out.length >= count) break
+    const goal = inferBeatGoalFromFeature(feature)
+    const targetUrl = pickTargetUrlForFeature(feature, understanding, productUrl)
+    const inputHint = inputHintForGoal(goal, feature, understanding.product_name)
+    let id = `beat-syn-${out.length + 1}`
+    while (existingIds.has(id)) id = `${id}-x`
+    existingIds.add(id)
+    out.push({
+      id,
+      goal,
+      outcomeDescription: `${understanding.product_name} demonstrates ${feature.replace(/\.+$/, '')}`.slice(0, 140),
+      targetUrl,
+      inputHint,
+      steps: [],
+      status: 'pending',
+      attempts: 0,
+    })
+  }
+  return out
 }
 
 /**

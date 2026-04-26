@@ -21,6 +21,7 @@ import type {
   DemoStep,
   SceneCapture,
   RecordingManifest,
+  RecordingDiagnostics,
   ElementBox,
   VideoLength,
   DomInventory,
@@ -36,7 +37,6 @@ const VIDEO_HEIGHT = 1080
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-const MAX_INITIAL_STEPS = 25
 const INTRO_OUTRO_SECONDS = 7
 const DEFAULT_VIDEO_LENGTH_SECONDS: VideoLength = 150
 const MIN_FINAL_VIDEO_SECONDS = 60
@@ -978,6 +978,10 @@ async function commitInput(
     }
 
     // 3-5. Enter key works for search bars, chat inputs, and most forms.
+    // Press twice with a short pause — search-as-you-type widgets that
+    // debounce a single Enter still respond to a quick double-press.
+    await page.keyboard.press('Enter').catch(() => { })
+    await page.waitForTimeout(50)
     await page.keyboard.press('Enter').catch(() => { })
     return 'enter'
   } catch {
@@ -987,10 +991,15 @@ async function commitInput(
 }
 
 /**
- * Race three signals that confirm a commit produced a visible outcome:
+ * Race four signals that confirm a commit produced a visible outcome:
  *   - URL change
- *   - DOM fingerprint delta (≥3 result-bearing nodes OR ≥200 chars text)
+ *   - DOM fingerprint delta (≥3 result-bearing nodes OR ≥120 chars text)
  *   - networkidle (gated on a request having actually fired post-commit)
+ *   - aria-live region populated (chat replies, inline form confirmations)
+ *
+ * The ceiling is adaptive: 8s default, 12s when the commit kind is
+ * `form-submit` (round-trips to a server, more likely slow) OR a network
+ * request fires within the first 1500ms (also implies a server round-trip).
  *
  * Returns the kind of signal that fired (or 'timeout'), the wall-clock ms
  * spent waiting, and whether to dwell long (viewer reads the result) or
@@ -999,13 +1008,24 @@ async function commitInput(
 async function awaitOutcome(
   page: Page,
   before: DomFingerprint,
-  ceilingMs: number = 6000,
-): Promise<{ kind: 'url' | 'dom' | 'network' | 'timeout'; dwellMs: number }> {
+  options: { commitKind?: 'form-submit' | 'sibling-button' | 'enter' | 'blur' | 'skipped'; ceilingMs?: number } = {},
+): Promise<{ kind: 'url' | 'dom' | 'network' | 'aria-live' | 'timeout'; dwellMs: number; outcomeMs: number }> {
   const start = Date.now()
+  const baseCeiling = options.ceilingMs ?? 8000
+  const slowCeiling = 12000
 
   let networkFired = false
   const onRequest = (): void => { networkFired = true }
   page.on('request', onRequest)
+
+  // Adaptive ceiling: form-submit always gets the slow ceiling; otherwise
+  // we briefly check whether a request fired in the first 1500ms (which
+  // implies a server round-trip), and if so extend to the slow ceiling.
+  let ceilingMs = options.commitKind === 'form-submit' ? slowCeiling : baseCeiling
+  if (ceilingMs === baseCeiling) {
+    await new Promise((r) => setTimeout(r, 1500))
+    if (networkFired) ceilingMs = slowCeiling
+  }
 
   const urlChanged = page
     .waitForURL((u) => u.toString() !== before.url, { timeout: ceilingMs })
@@ -1019,7 +1039,7 @@ async function awaitOutcome(
         const fn = new Function(`${script}; return domFingerprintScript()`) as () => { nodeCount: number; textLength: number }
         try {
           const fp = fn()
-          return Math.abs(fp.nodeCount - baseline.nodeCount) >= 3 || Math.abs(fp.textLength - baseline.textLength) >= 200
+          return Math.abs(fp.nodeCount - baseline.nodeCount) >= 3 || Math.abs(fp.textLength - baseline.textLength) >= 120
         } catch {
           return false
         }
@@ -1038,18 +1058,32 @@ async function awaitOutcome(
     .then(() => (networkFired ? ('network' as const) : null))
     .catch(() => null)
 
-  const winner = await Promise.race([urlChanged, domChanged, networkIdle, new Promise<null>((r) => setTimeout(() => r(null), ceilingMs + 200))])
+  // aria-live region populated post-commit. Threshold of 10 chars dodges
+  // empty/initial states where aria-live exists but is blank. Chat widgets
+  // and form-confirmation toasts almost always fire this signal.
+  const ariaLive = page
+    .waitForFunction(
+      () => Array.from(document.querySelectorAll('[aria-live]:not([aria-live="off"]), [role=status], [role=alert]'))
+        .some((n) => ((n as HTMLElement).textContent ?? '').trim().length > 10),
+      undefined,
+      { timeout: ceilingMs, polling: 250 },
+    )
+    .then(() => 'aria-live' as const)
+    .catch(() => null)
+
+  const winner = await Promise.race([urlChanged, domChanged, networkIdle, ariaLive, new Promise<null>((r) => setTimeout(() => r(null), ceilingMs + 200))])
   page.off('request', onRequest)
 
-  const elapsed = Date.now() - start
-  if (winner === 'url' || winner === 'dom' || winner === 'network') {
+  const outcomeMs = Date.now() - start
+  if (winner === 'url' || winner === 'dom' || winner === 'network' || winner === 'aria-live') {
     // Random 2.5–3.5s reveal dwell so the viewer can read the result.
     const dwellMs = 2500 + Math.floor(Math.random() * 1000)
-    return { kind: winner, dwellMs }
+    return { kind: winner, dwellMs, outcomeMs }
   }
   // No outcome — short dwell, signal upstream that the beat may need to retry.
-  void elapsed
-  return { kind: 'timeout', dwellMs: 900 }
+  // Log the fingerprint values so we can see what the recorder saw.
+  logger.info(`awaitOutcome: timeout after ${outcomeMs}ms (commitKind=${options.commitKind ?? 'n/a'}, networkFired=${networkFired}, before nodes=${before.nodeCount}/text=${before.textLength})`)
+  return { kind: 'timeout', dwellMs: 900, outcomeMs }
 }
 
 /**
@@ -1094,6 +1128,8 @@ async function captureStep(
   let outcomeKind: SceneCapture['outcomeKind']
   let outcomeScreenshotPath: string | undefined
   let clipEndOverrideMs: number | null = null
+  let commitKind: SceneCapture['commitKind']
+  let outcomeMs: number | undefined
 
   const shortLabel = step.element_to_click ? ` → "${sanitizeForLog(step.element_to_click, 40)}"` : ''
   logger.info(`recorder step ${stepIndex}: ${step.action}${shortLabel}`)
@@ -1117,15 +1153,26 @@ async function captureStep(
           ? raw
           : new URL(raw, ctx.productUrl).href
 
+        // Forbidden-URL gate: block navigates back to entry/homepage even
+        // when allowedPaths permits the URL (the entry IS in allowedPaths).
+        // This is the seed-phase counterpart to the click-time gate, and
+        // catches anything BeatRunner navigation might propose too.
+        const forbiddenKey = urlKey(targetUrl)
+        if (forbiddenKey && ctx.forbiddenRevisits.has(forbiddenKey)) {
+          logger.warn(`recorder step ${stepIndex}: navigate_to "${targetUrl}" is forbidden — skipping`)
+          clipStart = t()
+          elementNotFound = true
+          break
+        }
+
         // Only navigate to URLs that exist in the discovered siteMap.
         // This prevents Gemini hallucinations from triggering long 404 waits
         // or landing on dead pages that drag out the recording.
         if (ctx.allowedPaths) {
-          const key = urlKey(targetUrl)
           const sameOrigin = (() => {
             try { return new URL(targetUrl).origin === ctx.productOrigin } catch { return false }
           })()
-          if (!sameOrigin || !key || !ctx.allowedPaths.has(key)) {
+          if (!sameOrigin || !forbiddenKey || !ctx.allowedPaths.has(forbiddenKey)) {
             logger.warn(`recorder step ${stepIndex}: navigate_to "${targetUrl}" not in siteMap — skipping`)
             clipStart = t()
             elementNotFound = true
@@ -1141,6 +1188,19 @@ async function captureStep(
         await dismissPopups(page)
         await pageSettle(page, { networkIdleMs: 4000, settleMs: 800 })
         await markPageReady(page)
+
+        // Post-navigate landing check — if a redirect or auth wall dropped
+        // us on a forbidden URL anyway, retreat. Catches SPA route guards
+        // that 302 to "/" when an unauthenticated user hits an app route.
+        const landed = page.url()
+        const landedKey = urlKey(landed)
+        if (landedKey && ctx.forbiddenRevisits.has(landedKey)) {
+          logger.warn(`recorder step ${stepIndex}: navigate landed on forbidden URL ${landed} — going back`)
+          await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => { })
+          await pageSettle(page, { networkIdleMs: 2500, settleMs: 500 })
+          elementNotFound = true
+        }
+
         // Reset clipStart to AFTER the page has settled. The white loading
         // transition was captured into the MP4 but no clip references it,
         // which keeps mid-video white flashes out of the final cut.
@@ -1292,12 +1352,12 @@ async function captureStep(
             // explicitly opted out (e.g. for partial form fields).
             if (step.skipCommit !== true) {
               const before = await samplePageFingerprint(page)
-              const commitKind = await commitInput(page, locator, inventory)
+              commitKind = await commitInput(page, locator, inventory)
               logger.info(`recorder step ${stepIndex}: commit fired (${commitKind})`)
-              const ceiling = commitKind === 'enter' || commitKind === 'sibling-button' || commitKind === 'form-submit' ? 6000 : 3000
-              const outcome = await awaitOutcome(page, before, ceiling)
+              const outcome = await awaitOutcome(page, before, { commitKind })
               outcomeKind = outcome.kind
-              logger.info(`recorder step ${stepIndex}: outcome ${outcome.kind} (dwell ${outcome.dwellMs}ms)`)
+              outcomeMs = outcome.outcomeMs
+              logger.info(`recorder step ${stepIndex}: outcome ${outcome.kind} after ${outcome.outcomeMs}ms (dwell ${outcome.dwellMs}ms)`)
 
               // Modal popups frequently appear after a commit (e.g. "Sign up
               // to see results"). Dismiss before we capture the outcome frame.
@@ -1317,6 +1377,7 @@ async function captureStep(
               clipEndOverrideMs = t()
             } else {
               outcomeKind = 'none'
+              commitKind = 'skipped'
               await page.waitForTimeout(450)
             }
           } catch {
@@ -1419,6 +1480,8 @@ async function captureStep(
     beatStepRole: step.beatStepRole,
     outcomeKind,
     outcomeScreenshotPath,
+    commitKind,
+    outcomeMs,
   }
 }
 
@@ -1465,25 +1528,13 @@ export async function recordProduct(
     logger.info(`recorder: navigate allow-list has ${allowedPaths.size} entries`)
   }
 
-  // ── Build seed plan from pre-computed demo_flow ───────────────────────────
-  // The live loop below extends this seed until the requested duration is met.
-  const demoSteps: DemoStep[] = [
-    ...understanding.demo_flow.slice(0, MAX_INITIAL_STEPS),
-  ]
-
-  const hasScrolls = demoSteps.some(
-    (s) => s.action === 'scroll_down' || s.action === 'scroll_up',
-  )
-  if (!hasScrolls || demoSteps.length < 4) {
-    demoSteps.push(
-      { step: 90, action: 'scroll_down', description: 'Explore the page', narration: `Here's what ${understanding.product_name} can do.` },
-      { step: 91, action: 'scroll_down', description: 'More features', narration: 'Every detail is crafted for clarity.' },
-      { step: 92, action: 'scroll_down', description: 'Continue exploring', narration: `${understanding.product_name} — built for speed.` },
-      { step: 93, action: 'scroll_up', description: 'Back to top', narration: 'Start your free trial today.' },
-    )
-  }
-
-  logger.info(`recorder: ${demoSteps.length} pre-planned seed steps`)
+  // Seed phase REMOVED. Beats are now the SOLE source of demo footage; the
+  // recorder lands on the entry URL, captures a tiny intro-hook (one scroll
+  // down, one scroll up, ~7s total) so the video opens with brand context,
+  // and then enters the BeatRunner while-loop with the full target budget.
+  // `understanding.demo_flow` remains on the type for backward compat (the
+  // dashboard / status route may still read it) but is never executed.
+  logger.info(`recorder: beats-only mode — proposed_beats=${understanding.proposed_beats?.length ?? 0}`)
 
   // ── Open browser with recordVideo ─────────────────────────────────────────
   // headless: false — compositor renders at full speed, capturing real motion.
@@ -1588,12 +1639,33 @@ export async function recordProduct(
       }
     }
 
-    for (let i = 0; i < demoSteps.length; i++) {
-      if (capturedClipDurationMs(scenes) >= targetDemoMs) break
-      if (Date.now() - recordingStartTime >= maxWallClockMs) break
-      const step = demoSteps[i]
-      const scene = await captureStep(ctx, step, ++stepCounter)
-      pushScene(scene)
+    // ── Intro-hook pass ──────────────────────────────────────────────────────
+    // A tiny landing-page intro (~7s) so the video opens with brand context
+    // before diving into beats. Two scrolls with `beatId: 'intro-hook'` and
+    // `beatStepRole: 'open'`. Generates ~7s of footage; the BeatRunner gets
+    // ~136s of the ~143s target budget.
+    const introScrollDown: DemoStep = {
+      step: 1,
+      action: 'scroll_down',
+      description: 'Reveal the hero section',
+      narration: `Meet ${understanding.product_name}.`,
+      beatStepRole: 'open',
+    }
+    const introScrollUp: DemoStep = {
+      step: 2,
+      action: 'scroll_up',
+      description: 'Return to the top',
+      narration: understanding.tagline.length < 80 ? understanding.tagline : `${understanding.product_name} — built for what you need.`,
+      beatStepRole: 'open',
+    }
+    const intro1 = await captureStep(ctx, introScrollDown, ++stepCounter)
+    intro1.beatId = 'intro-hook'
+    pushScene(intro1)
+    await handlePageAfterScene(ctx)
+    if (capturedClipDurationMs(scenes) < targetDemoMs && Date.now() - recordingStartTime < maxWallClockMs) {
+      const intro2 = await captureStep(ctx, introScrollUp, ++stepCounter)
+      intro2.beatId = 'intro-hook'
+      pushScene(intro2)
       await handlePageAfterScene(ctx)
     }
 
@@ -1604,6 +1676,7 @@ export async function recordProduct(
     // from adaptive `proposeBeat` calls keyed to the current page.
     const beatQueue: DemoBeat[] = (understanding.proposed_beats ?? []).map((b) => ({ ...b, status: 'pending', attempts: 0, steps: [] }))
     const completedBeats: DemoBeat[] = []
+    let endReason: 'queue-empty' | 'stuck' | 'live-batch-cap' | 'wall-clock-cap' | 'target-met' = 'target-met'
     logger.info(`recorder: beat queue seeded with ${beatQueue.length} beats from understanding`)
 
     /** Loop detection: tighter than the prior 0.85 / 3-consecutive thresholds.
@@ -1728,19 +1801,20 @@ export async function recordProduct(
       if (producedAchievement) {
         beat.status = 'achieved'
         completedBeats.push(beat)
-        logger.info(`recorder: beat ${beat.id} ACHIEVED`)
+        logger.info(`recorder: beat ${beat.id} (${beat.goal}) → status=achieved achieved=true attempts=${beat.attempts}`)
         return true
       }
 
       if (beat.attempts >= 2) {
         beat.status = 'abandoned'
         completedBeats.push(beat)
-        logger.info(`recorder: beat ${beat.id} ABANDONED after ${beat.attempts} attempts`)
+        logger.info(`recorder: beat ${beat.id} (${beat.goal}) → status=abandoned achieved=false attempts=${beat.attempts}`)
         return false
       }
 
       // Re-queue for one more attempt.
       beat.status = 'pending'
+      logger.info(`recorder: beat ${beat.id} (${beat.goal}) → status=requeued achieved=false attempts=${beat.attempts}`)
       beatQueue.unshift(beat)
       return false
     }
@@ -1748,14 +1822,17 @@ export async function recordProduct(
     while (capturedClipDurationMs(scenes) < targetDemoMs) {
       if (Date.now() - recordingStartTime >= maxWallClockMs) {
         logger.warn(`recorder: hit wall-clock cap with ${Math.round(capturedClipDurationMs(scenes) / 1000)}s clips`)
+        endReason = 'wall-clock-cap'
         break
       }
       if (liveBatch >= MAX_LIVE_BATCHES) {
         logger.info('recorder: hit live planning batch cap — ending cleanly')
+        endReason = 'live-batch-cap'
         break
       }
       if (looksStuck()) {
         logger.info('recorder: novelty + entropy signals say stuck — ending cleanly')
+        endReason = 'stuck'
         break
       }
 
@@ -1770,6 +1847,7 @@ export async function recordProduct(
         const proposed = await proposeBeat(page.url(), understanding.product_name, understanding, filterInventory(inv, ctx.forbiddenRevisits, (u) => urlKey(u) ?? u))
         if (!proposed) {
           logger.info('recorder: beat queue empty + no new beat proposed → ending cleanly')
+          endReason = 'queue-empty'
           break
         }
         beat = proposed
@@ -1830,6 +1908,22 @@ export async function recordProduct(
       `recorder: recording.mp4 saved — ${Math.round(fs.statSync(recordingMp4).size / 1024 / 1024)} MB`,
     )
 
+    const achievedCount = completedBeats.filter((b) => b.status === 'achieved').length
+    const abandonedCount = completedBeats.filter((b) => b.status === 'abandoned').length
+    const typeScenes = scenes.filter((s) => s.action === 'type')
+    const typesTotal = typeScenes.length
+    const typesWithOutcome = typeScenes.filter((s) => s.outcomeKind === 'url' || s.outcomeKind === 'dom' || s.outcomeKind === 'network' || s.outcomeKind === 'aria-live').length
+    const diagnostics: RecordingDiagnostics = {
+      beatsAchieved: achievedCount,
+      beatsAbandoned: abandonedCount,
+      typesTotal,
+      typesWithOutcome,
+      endReason,
+    }
+    logger.info(
+      `recorder: beats achieved=${achievedCount}/${completedBeats.length}, types-with-outcome=${typesWithOutcome}/${typesTotal}, endReason=${endReason}`,
+    )
+
     const manifest: RecordingManifest = {
       productUrl: entryUrl,
       productName: understanding.product_name,
@@ -1838,9 +1932,8 @@ export async function recordProduct(
       scenes,
       prerollMs,
       beats: completedBeats,
+      diagnostics,
     }
-    const achievedCount = completedBeats.filter((b) => b.status === 'achieved').length
-    logger.info(`recorder: beats ran ${completedBeats.length} (${achievedCount} achieved, ${completedBeats.length - achievedCount} abandoned)`)
     fs.writeFileSync(
       path.join(outputDir, 'manifest.json'),
       JSON.stringify(manifest, null, 2),
